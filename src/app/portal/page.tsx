@@ -9,6 +9,10 @@ import { prisma } from '@/lib/db';
 import { redirect } from 'next/navigation';
 import { TIER_LADDER, REGION_BASELINE } from '@/facts';
 import { getPortalLang, t } from '@/lib/portal-lang';
+import { partnerEsgEstimate, DIVERTED_FATES } from '@/lib/esg';
+import { MIN_AGGREGATE } from '@/lib/sector-report';
+import IndicativeChip from '@/components/IndicativeChip';
+import CountUp from '@/components/viz/CountUp';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +54,35 @@ export default async function PortalHome() {
   const openTickets = await prisma.collectionTicket.count({
     where: { partnerId: partner.id, status: { in: ['OPEN', 'CLAIMED'] } },
   });
+
+  // ── M3: My Contribution — climate stats, fate mix, benchmark ──
+  const esg = await partnerEsgEstimate(partner.id, year);
+  const harmfulTons = esg.harmfulTons;
+
+  // Benchmark position: partner's diversion rate vs emirate peers (≥3 floor).
+  const peerReports = await prisma.wasteRecord.findMany({
+    where: {
+      report: { status: 'APPROVED', year, partner: { region: partner.region } },
+    },
+    select: { fate: true, tons: true, report: { select: { partnerId: true } } },
+  });
+  const peerIds = new Set(peerReports.map((r) => r.report.partnerId));
+  let benchmarkPct: number | null = null;
+  if (peerIds.size >= MIN_AGGREGATE && esg.diversionRatePct !== null) {
+    const rates = new Map<string, { d: number; t: number }>();
+    for (const r of peerReports) {
+      const e = rates.get(r.report.partnerId) ?? { d: 0, t: 0 };
+      e.t += r.tons;
+      if ((DIVERTED_FATES as readonly string[]).includes(r.fate)) e.d += r.tons;
+      rates.set(r.report.partnerId, e);
+    }
+    const better = [...rates.entries()].filter(([id, v]) => {
+      if (id === partner.id) return false;
+      return v.t > 0 && (v.d / v.t) * 100 < esg.diversionRatePct!;
+    }).length;
+    // percentile = share of peers whose rate is below yours
+    benchmarkPct = Math.max(1, Math.round((better / (peerIds.size - 1)) * 100));
+  }
 
   const statusLabel: Record<string, string> = {
     DRAFT: t(lang, 'In progress with Abdullah', 'قيد الإعداد مع عبدالله'),
@@ -160,6 +193,122 @@ export default async function PortalHome() {
             >
               {t(lang, 'Restore my standing →', '← استعادة العضوية')}
             </Link>
+          </div>
+        </section>
+      )}
+
+      {/* My Contribution — climate stats first (M3) */}
+      <section className="fade-up fade-up-1 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <div className="rounded-2xl border border-line bg-white p-4 shadow-card">
+          <div className="mb-1.5 text-[11px] uppercase tracking-[0.12em] text-muted">
+            {t(lang, 'Reported', 'مُبلَّغ')}
+          </div>
+          <div className="text-2xl font-semibold tracking-tight text-ink">
+            <CountUp value={esg.totalWasteTons} decimals={1} />
+            <span className="ml-1 text-sm font-normal text-muted">t</span>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">
+            {t(lang, `residue in ${year}`, `نواتج في ${year}`)}
+          </div>
+        </div>
+        <div className="rounded-2xl border border-line bg-white p-4 shadow-card">
+          <div className="mb-1.5 text-[11px] uppercase tracking-[0.12em] text-muted">
+            {t(lang, 'Diverted', 'مُحوَّل')}
+          </div>
+          <div className="text-2xl font-semibold tracking-tight text-mint-700">
+            <CountUp value={esg.divertedTons} decimals={1} />
+            <span className="ml-1 text-sm font-normal text-muted">t</span>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">
+            {esg.diversionRatePct !== null
+              ? `${esg.diversionRatePct}% ${t(lang, 'of your residue', 'من نواتجكم')}`
+              : t(lang, 'fed · sold · recycled', 'أعلاف · مبيعات · تدوير')}
+          </div>
+        </div>
+        <div className="rounded-2xl border border-line bg-white p-4 shadow-card">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] uppercase tracking-[0.12em] text-muted">
+            {t(lang, 'Climate', 'الأثر المناخي')}
+            <IndicativeChip />
+          </div>
+          <div className="text-2xl font-semibold tracking-tight text-ink">
+            <CountUp value={esg.estAvoidedTCO2e} decimals={1} />
+            <span className="ml-1 text-sm font-normal text-muted">tCO₂e</span>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">
+            {t(lang, 'avoided (est.)', 'انبعاثات متجنَّبة')}
+          </div>
+        </div>
+        <div className="rounded-2xl border border-line bg-white p-4 shadow-card">
+          <div className="mb-1.5 text-[11px] uppercase tracking-[0.12em] text-muted">
+            {t(lang, 'Opportunity', 'الفرصة')}
+          </div>
+          <div className="text-2xl font-semibold tracking-tight text-gold-600">
+            <CountUp value={esg.opportunityTCO2e} decimals={1} />
+            <span className="ml-1 text-sm font-normal text-muted">tCO₂e</span>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">
+            {harmfulTons > 0
+              ? t(lang, `if ${harmfulTons} t burned/dumped were diverted`, `لو حُوِّلت ${harmfulTons} طن محروقة/مدفونة`)
+              : t(lang, 'no harmful-fate residue — ممتاز', 'لا نواتج ضارة — ممتاز')}
+          </div>
+        </div>
+      </section>
+
+      {/* Fate mix + benchmark position */}
+      {esg.totalWasteTons > 0 && (
+        <section className="fade-up fade-up-1 rounded-2xl border border-line bg-white p-5 shadow-card">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <div className="section-rule" aria-hidden />
+              <h2 className="text-lg font-semibold tracking-tight text-brand-800">
+                {t(lang, 'Where your residue went', 'وجهة نواتجكم')}
+              </h2>
+            </div>
+            {benchmarkPct !== null && (
+              <span className="rounded-full bg-mint-100 px-3 py-1 text-xs font-semibold text-mint-700">
+                {benchmarkPct >= 50
+                  ? t(lang, `Top ${100 - benchmarkPct}% in your emirate`, `ضمن أفضل ${100 - benchmarkPct}% في إمارتكم`)
+                  : t(lang, `Ahead of ${benchmarkPct}% of your emirate`, `متقدمون على ${benchmarkPct}% في إمارتكم`)}
+              </span>
+            )}
+          </div>
+          <div className="mt-4 flex h-[22px] w-full gap-[2px] overflow-hidden rounded-lg">
+            {esg.divertedTons > 0 && (
+              <div
+                className="viz-grow h-full bg-mint-500"
+                style={{ width: `${(esg.divertedTons / esg.totalWasteTons) * 100}%` }}
+                title={`${esg.divertedTons.toLocaleString('en-US')} t diverted`}
+              />
+            )}
+            {harmfulTons > 0 && (
+              <div
+                className="h-full bg-gold-600"
+                style={{ width: `${(harmfulTons / esg.totalWasteTons) * 100}%` }}
+                title={`${harmfulTons.toLocaleString('en-US')} t burned/buried/dumped`}
+              />
+            )}
+            {esg.totalWasteTons - esg.divertedTons - harmfulTons > 0 && (
+              <div
+                className="h-full bg-brand-100"
+                style={{ width: `${((esg.totalWasteTons - esg.divertedTons - harmfulTons) / esg.totalWasteTons) * 100}%` }}
+                title="Unclassified fate"
+              />
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-4 text-[11px] text-muted">
+            <span className="inline-flex items-center gap-1.5">
+              <i className="h-2.5 w-2.5 rounded-[3px] bg-mint-500" />
+              {t(lang, `Diverted — ${esg.divertedTons} t`, `مُحوَّل — ${esg.divertedTons} طن`)}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <i className="h-2.5 w-2.5 rounded-[3px] bg-gold-600" />
+              {t(lang, `Burned · buried · dumped — ${harmfulTons} t`, `محروق · مدفون · ملقى — ${harmfulTons} طن`)}
+            </span>
+            {esg.opportunityTCO2e > 0 && (
+              <span className="ml-auto text-gold-700">
+                {t(lang, `Divert it all → +${esg.opportunityTCO2e} tCO₂e`, `حوّلوه كله ← +${esg.opportunityTCO2e} طن مكافئ`)}
+              </span>
+            )}
           </div>
         </section>
       )}

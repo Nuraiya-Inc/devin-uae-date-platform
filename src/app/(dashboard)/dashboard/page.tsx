@@ -13,7 +13,10 @@ import { prisma } from '@/lib/db';
 import { REGION_BASELINE, UPN_FACTS } from '@/facts';
 import CountUp from '@/components/viz/CountUp';
 import RegionBars from '@/components/viz/RegionBars';
-import { nationalEsgEstimate } from '@/lib/esg';
+import NetZeroTrajectory from '@/components/NetZeroTrajectory';
+import IndicativeChip from '@/components/IndicativeChip';
+import MandateBadges from '@/components/MandateBadges';
+import { nationalEsgEstimate, nationalNetZeroContext, UAE_NET_ZERO_TARGET_YEAR } from '@/lib/esg';
 
 export const dynamic = 'force-dynamic';
 
@@ -52,7 +55,10 @@ export default async function DashboardPage() {
     }),
   ]);
 
-  const esg = await nationalEsgEstimate(new Date().getUTCFullYear());
+  const [esg, netZero] = await Promise.all([
+    nationalEsgEstimate(new Date().getUTCFullYear()),
+    nationalNetZeroContext(),
+  ]);
   const totals = UPN_FACTS.baseline.nationalTotals;
   const tierCount = (t: string) => partnersByTier.find((x) => x.tier === t)?._count ?? 0;
   const statusCount = (s: string) => reportCounts.find((x) => x.status === s)?._count ?? 0;
@@ -126,6 +132,16 @@ export default async function DashboardPage() {
               indicative estimate with measured national data, and every diverted ton is a visible
               contribution to the Emirates&apos; circular-economy and Net Zero 2050 goals.
             </p>
+            {netZero.measuredSharePct !== null && (
+              <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-3 py-2">
+                <span className="text-2xl font-semibold tabular-nums">
+                  <CountUp value={netZero.measuredSharePct} decimals={netZero.measuredSharePct < 10 ? 1 : 0} suffix="%" />
+                </span>
+                <span className="text-[11px] leading-tight text-white/75">
+                  of estimated national residue<br />now measured · the MRV gap we close
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Utilization gauge — 270° arc */}
@@ -170,7 +186,8 @@ export default async function DashboardPage() {
           </div>
           <div className="mt-0.5 text-xl font-semibold text-ink">
             ~<CountUp value={esg.estAvoidedTCO2e} /> tCO₂e avoided this year
-            <span className="ml-2 text-sm font-normal text-muted">
+            <IndicativeChip className="mx-2 -translate-y-0.5 align-middle" />
+            <span className="text-sm font-normal text-muted">
               from {esg.divertedTons.toLocaleString('en-US')} t verified diversion
               {esg.carYearEquivalent > 0 && ` · ≈ ${esg.carYearEquivalent.toLocaleString('en-US')} cars off the road`}
             </span>
@@ -179,6 +196,122 @@ export default async function DashboardPage() {
         <span className="text-[11px] text-muted">
           Indicative factor · not verified carbon accounting — MRV dataset for GCOM/RVCMC readiness
         </span>
+      </section>
+
+      {/* ── Net Zero 2050 trajectory + fate shift ────────────── */}
+      <section className="fade-up fade-up-2 grid gap-6 lg:grid-cols-5">
+        {/* Trajectory */}
+        <div className="rounded-2xl border border-line bg-white p-5 shadow-card sm:p-6 lg:col-span-3">
+          <div className="section-rule" aria-hidden />
+          <div className="flex items-baseline justify-between">
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight text-brand-800">
+                Net Zero {UAE_NET_ZERO_TARGET_YEAR} trajectory
+              </h2>
+              <p className="text-xs text-muted">
+                Cumulative measured diversion, priced as indicative avoided emissions · hover a point for detail
+              </p>
+            </div>
+            <IndicativeChip />
+          </div>
+          <div className="mt-4">
+            {netZero.perYear.length > 0 ? (
+              <NetZeroTrajectory
+                perYear={netZero.perYear}
+                targetYear={UAE_NET_ZERO_TARGET_YEAR}
+                currentYear={netZero.currentYear}
+              />
+            ) : (
+              <p className="py-8 text-center text-sm text-muted">
+                The trajectory starts with the first approved report.
+              </p>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-muted">
+            <span>
+              <span className="font-semibold text-ink tabular-nums">
+                {netZero.cumulativeAvoidedTCO2e.toLocaleString('en-US')}
+              </span>{' '}
+              tCO₂e cumulative (indicative)
+            </span>
+            <span>
+              <span className="font-semibold text-ink tabular-nums">
+                {netZero.contributingPartners}
+              </span>{' '}
+              partners contributing in {netZero.currentYear}
+            </span>
+            <span>
+              <span className="font-semibold text-ink tabular-nums">
+                {netZero.yearsToTarget}
+              </span>{' '}
+              years to the horizon
+            </span>
+          </div>
+        </div>
+
+        {/* Fate shift — diverted vs harmful, diverging palette */}
+        <div className="rounded-2xl border border-line bg-white p-5 shadow-card sm:p-6 lg:col-span-2">
+          <div className="section-rule" aria-hidden />
+          <h2 className="text-lg font-semibold tracking-tight text-brand-800">Fate shift</h2>
+          <p className="mb-4 text-xs text-muted">
+            Residue diverted vs burned/buried/dumped, per year — the shift the platform measures
+          </p>
+          {netZero.perYear.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted">No approved reports yet.</p>
+          ) : (
+            <div className="space-y-4">
+              {netZero.perYear.map((y) => {
+                const tot = y.divertedTons + y.harmfulTons;
+                const pct = tot > 0 ? (y.divertedTons / tot) * 100 : 0;
+                return (
+                  <div key={y.year}>
+                    <div className="mb-1 flex justify-between text-xs">
+                      <span className="font-medium text-ink">{y.year}</span>
+                      <span className="tabular-nums text-muted">
+                        {Math.round(pct)}% diverted
+                      </span>
+                    </div>
+                    <div className="flex h-[18px] w-full gap-[2px] overflow-hidden rounded-lg">
+                      <div
+                        className="viz-grow h-full bg-mint-500"
+                        style={{ width: `${pct}%` }}
+                        title={`${y.divertedTons.toLocaleString('en-US')} t diverted`}
+                      />
+                      <div
+                        className="h-full bg-gold-600"
+                        style={{ width: `${100 - pct}%` }}
+                        title={`${y.harmfulTons.toLocaleString('en-US')} t burned/buried/dumped`}
+                      />
+                    </div>
+                    <div className="mt-0.5 flex justify-between text-[10px] text-muted">
+                      <span>{y.divertedTons.toLocaleString('en-US')} t diverted</span>
+                      <span>{y.harmfulTons.toLocaleString('en-US')} t still harmful</span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="flex items-center gap-4 pt-1 text-[10px] text-muted">
+                <span className="inline-flex items-center gap-1.5">
+                  <i className="h-2.5 w-2.5 rounded-[3px] bg-mint-500" /> Diverted
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <i className="h-2.5 w-2.5 rounded-[3px] bg-gold-600" /> Burned · buried · dumped
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ── Mandate hooks — every number feeds a commitment ── */}
+      <section className="fade-up fade-up-3 rounded-2xl border border-line bg-white p-5 shadow-card">
+        <div className="mb-3 flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold tracking-tight text-brand-800">
+            What these numbers feed
+          </h2>
+          <span className="text-[11px] text-muted">measured residue → national mandates</span>
+        </div>
+        <MandateBadges />
       </section>
 
       {/* ── KPI tiles ──────────────────────────────────────── */}

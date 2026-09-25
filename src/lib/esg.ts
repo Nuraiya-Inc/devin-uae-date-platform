@@ -17,6 +17,7 @@
  */
 
 import { prisma } from './db';
+import { REGION_BASELINE } from '@/facts';
 
 /** Indicative tCO2e avoided per ton of residue diverted from burn/bury/dump. */
 export const INDICATIVE_FACTOR_TCO2E_PER_TON = 1.2;
@@ -24,26 +25,40 @@ export const INDICATIVE_FACTOR_TCO2E_PER_TON = 1.2;
 /** Fates that count as productive diversion. */
 export const DIVERTED_FATES = ['FEED', 'SOLD', 'RECYCLED'] as const;
 
+/** Fates that are harmful — burn/bury/dump. These are the OPPORTUNITY:
+ *  every harmful ton diverted becomes measured avoided emissions. */
+export const HARMFUL_FATES = ['BURNED', 'BURIED', 'DUMPED'] as const;
+
 /** Rough equivalence for communication only: passenger car-year ≈ 4.6 tCO2e. */
 const CAR_YEAR_TCO2E = 4.6;
 
 export interface EsgEstimate {
   year: number;
   divertedTons: number;
+  harmfulTons: number;
+  /** Additional indicative tCO2e available if harmful tons were diverted —
+   *  the opportunity number: what this partner/sector could still capture. */
+  opportunityTCO2e: number;
   totalWasteTons: number;
   diversionRatePct: number | null;
   estAvoidedTCO2e: number;
   carYearEquivalent: number;
   byStream: Array<{ stream: string; divertedTons: number; estAvoidedTCO2e: number }>;
+  /** Honesty contract: this is an indicative estimate. UI renders
+   *  <IndicativeChip /> wherever these figures surface. Always true. */
+  indicative: true;
 }
 
-function summarize(
+export function summarize(
   year: number,
   records: Array<{ stream: string; fate: string; tons: number }>,
 ): EsgEstimate {
   const total = records.reduce((a, r) => a + r.tons, 0);
   const diverted = records.filter((r) => (DIVERTED_FATES as readonly string[]).includes(r.fate));
   const divertedTons = diverted.reduce((a, r) => a + r.tons, 0);
+  const harmfulTons = records
+    .filter((r) => (HARMFUL_FATES as readonly string[]).includes(r.fate))
+    .reduce((a, r) => a + r.tons, 0);
 
   const byStreamMap = new Map<string, number>();
   for (const r of diverted) {
@@ -54,6 +69,8 @@ function summarize(
   return {
     year,
     divertedTons,
+    harmfulTons: Math.round(harmfulTons * 10) / 10,
+    opportunityTCO2e: Math.round(harmfulTons * INDICATIVE_FACTOR_TCO2E_PER_TON * 10) / 10,
     totalWasteTons: total,
     diversionRatePct: total > 0 ? Math.round((divertedTons / total) * 100) : null,
     estAvoidedTCO2e: Math.round(est * 10) / 10,
@@ -65,6 +82,7 @@ function summarize(
         estAvoidedTCO2e: Math.round(tons * INDICATIVE_FACTOR_TCO2E_PER_TON * 10) / 10,
       }))
       .sort((a, b) => b.divertedTons - a.divertedTons),
+    indicative: true,
   };
 }
 
@@ -208,9 +226,18 @@ export interface NetZeroContext {
   yearsToTarget: number;
   annualAvoidedTCO2e: number;      // this year, network-wide (indicative)
   cumulativeAvoidedTCO2e: number;  // all approved years to date (indicative)
+  annualDivertedTons: number;      // diverted tons this year, network-wide
   carYearEquivalent: number;       // cumulative, for communication
   contributingPartners: number;    // partners with any diverted tonnage this year
-  perYear: Array<{ year: number; avoidedTCO2e: number }>;
+  /** MRV coverage — % of the sector's ESTIMATED annual residue now measured
+   *  by the network (reported waste tons ÷ baseline palm-byproduct estimate).
+   *  This is the headline story number: how much of the invisible residue the
+   *  platform has made visible. Null when the baseline is unknown. */
+  measuredSharePct: number | null;
+  estimatedNationalResidueTons: number; // baseline estimate the share is against
+  perYear: Array<{ year: number; avoidedTCO2e: number; divertedTons: number; harmfulTons: number }>;
+  /** Honesty contract: every figure here is indicative. Always true. */
+  indicative: true;
 }
 
 /** Network-wide Net Zero context across all approved years. */
@@ -222,33 +249,93 @@ export async function nationalNetZeroContext(now: Date = new Date()): Promise<Ne
     select: { fate: true, tons: true, report: { select: { year: true, partnerId: true } } },
   });
 
-  const perYearMap = new Map<number, number>();
+  const perYearMap = new Map<number, { diverted: number; harmful: number }>();
   const contributorsThisYear = new Set<string>();
   let cumulativeDiverted = 0;
   let annualDiverted = 0;
+  let measuredThisYear = 0;
 
   for (const r of records) {
-    if (!(DIVERTED_FATES as readonly string[]).includes(r.fate)) continue;
     const y = r.report.year;
-    cumulativeDiverted += r.tons;
-    perYearMap.set(y, (perYearMap.get(y) ?? 0) + r.tons);
-    if (y === currentYear) {
-      annualDiverted += r.tons;
-      contributorsThisYear.add(r.report.partnerId);
+    if (y === currentYear) measuredThisYear += r.tons;
+    const py = perYearMap.get(y) ?? { diverted: 0, harmful: 0 };
+    if ((DIVERTED_FATES as readonly string[]).includes(r.fate)) {
+      py.diverted += r.tons;
+      cumulativeDiverted += r.tons;
+      if (y === currentYear) {
+        annualDiverted += r.tons;
+        contributorsThisYear.add(r.report.partnerId);
+      }
+    } else if ((HARMFUL_FATES as readonly string[]).includes(r.fate)) {
+      py.harmful += r.tons;
     }
+    perYearMap.set(y, py);
   }
 
   const cumulativeAvoided = cumulativeDiverted * INDICATIVE_FACTOR_TCO2E_PER_TON;
+
+  // MRV coverage: reported residue tons vs the sector's baseline estimate.
+  // Only REPORTED waste counts — the point is measured vs estimated.
+  const nationalBaseline = REGION_BASELINE.reduce((a, r) => a + (r.palmByproductsTons ?? 0), 0);
+  const measuredSharePct =
+    nationalBaseline > 0 ? Math.round((measuredThisYear / nationalBaseline) * 1000) / 10 : null;
 
   return {
     currentYear,
     yearsToTarget: Math.max(0, UAE_NET_ZERO_TARGET_YEAR - currentYear),
     annualAvoidedTCO2e: Math.round(annualDiverted * INDICATIVE_FACTOR_TCO2E_PER_TON * 10) / 10,
     cumulativeAvoidedTCO2e: Math.round(cumulativeAvoided * 10) / 10,
+    annualDivertedTons: Math.round(annualDiverted * 10) / 10,
     carYearEquivalent: Math.round(cumulativeAvoided / CAR_YEAR_TCO2E),
     contributingPartners: contributorsThisYear.size,
+    measuredSharePct,
+    estimatedNationalResidueTons: nationalBaseline,
     perYear: [...perYearMap.entries()]
-      .map(([year, tons]) => ({ year, avoidedTCO2e: Math.round(tons * INDICATIVE_FACTOR_TCO2E_PER_TON * 10) / 10 }))
+      .map(([year, t]) => ({
+        year,
+        avoidedTCO2e: Math.round(t.diverted * INDICATIVE_FACTOR_TCO2E_PER_TON * 10) / 10,
+        divertedTons: Math.round(t.diverted * 10) / 10,
+        harmfulTons: Math.round(t.harmful * 10) / 10,
+      }))
       .sort((a, b) => a.year - b.year),
+    indicative: true,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CLIMATE NARRATIVE — frames residue diversion honestly.
+//
+// The honest physics: residue that is burned emits CO2 immediately;
+// residue dumped or buried decomposes anaerobically and releases METHANE
+// — a far more potent near-term warming gas. Diverting it (feed, sale,
+// recycling) avoids BOTH. Methane is the near-term lever: cutting it
+// buys time this decade. Diversion = methane avoidance (near-term win)
+// + CO2 avoidance (permanent win).
+// ─────────────────────────────────────────────────────────────────
+
+export interface ClimateNarrative {
+  headlineEn: string;
+  headlineAr: string;
+  detailEn: string;
+  /** The avoided emissions figure — always indicative. */
+  avoidedTCO2e: number;
+  /** Still-on-the-table: what additional avoidance harmful tons would yield. */
+  opportunityTCO2e: number;
+  indicative: true;
+}
+
+/** Frame an EsgEstimate as methane + CO2 avoidance for any surface. */
+export function climateNarrative(est: EsgEstimate): ClimateNarrative {
+  const avoided = est.estAvoidedTCO2e;
+  return {
+    headlineEn: `${avoided.toLocaleString('en-US')} tCO₂e avoided — indicative`,
+    headlineAr: `تجنب ${avoided.toLocaleString('en-US')} طن من ثاني أكسيد الكربون المكافئ — تقديري`,
+    detailEn:
+      'Residue diverted from burning skips the immediate CO₂ release; residue diverted from ' +
+      'dumping skips the methane that anaerobic decay releases — a far more potent near-term ' +
+      'warming gas. Diversion is a methane cut now plus a CO₂ cut permanently.',
+    avoidedTCO2e: avoided,
+    opportunityTCO2e: est.opportunityTCO2e,
+    indicative: true,
   };
 }

@@ -156,6 +156,18 @@ body {
   animation: arc-draw 1200ms 250ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
+/* Line draw-in — for the Net Zero trajectory (M4). The polyline sets
+   stroke-dasharray to its own length via pathLength so 1 = full draw. */
+@keyframes line-draw {
+  from { stroke-dashoffset: 1; }
+  to   { stroke-dashoffset: 0; }
+}
+.draw-in {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: line-draw 1400ms 300ms cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
 /* Subtle engineered dot-grid for dark hero surfaces */
 .dot-grid {
   background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
@@ -163,7 +175,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .viz-grow, .fade-up, .arc-animate { animation: none; }
+  .viz-grow, .fade-up, .arc-animate, .draw-in { animation: none; stroke-dashoffset: 0 !important; }
 }
 
 /* Print / Save-as-PDF — used by the State of the Sector report. */

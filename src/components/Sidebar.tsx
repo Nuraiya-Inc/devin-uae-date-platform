@@ -83,39 +83,43 @@ interface SidebarProps {
 interface NavItem {
   href: string;
   label: string;
+  /** Arabic label — rendered as the secondary line per the bilingual IA. */
+  labelAr?: string;
   icon: React.ElementType;
 }
 
 interface NavGroupDef {
   label?: string;
+  labelAr?: string;
   items: NavItem[];
 }
 
 const NAV: NavGroupDef[] = [
   {
     items: [
-      { href: '/dashboard',  label: 'Dashboard',  icon: LayoutDashboard },
-      { href: '/needs-you',  label: 'Needs you',  icon: Inbox },
-      { href: '/feed',       label: 'Live feed',  icon: Activity },
-      { href: '/approvals',  label: 'Approvals',  icon: ShieldCheck },
-      { href: '/review',     label: 'Review queue', icon: ClipboardCheck },
-      { href: '/facts',      label: 'Fact graph', icon: BookOpen },
-      { href: '/activity',   label: 'Audit log',  icon: Activity },
-      { href: '/guide',      label: 'Guide',      icon: LifeBuoy },
+      { href: '/dashboard',  label: 'National Impact',  labelAr: 'الأثر الوطني', icon: LayoutDashboard },
+      { href: '/needs-you',  label: 'Needs you',  labelAr: 'يلزمك الانتباه', icon: Inbox },
+      { href: '/feed',       label: 'Live feed',  labelAr: 'البث المباشر', icon: Activity },
+      { href: '/approvals',  label: 'Approvals',  labelAr: 'الاعتمادات', icon: ShieldCheck },
+      { href: '/review',     label: 'Review queue', labelAr: 'طابور المراجعة', icon: ClipboardCheck },
+      { href: '/facts',      label: 'Fact graph', labelAr: 'الحقائق', icon: BookOpen },
+      { href: '/activity',   label: 'Audit log',  labelAr: 'سجل التدقيق', icon: Activity },
+      { href: '/guide',      label: 'Guide',      labelAr: 'الدليل', icon: LifeBuoy },
     ],
   },
   {
     label: 'Network',
+    labelAr: 'الشبكة',
     items: [
-      { href: '/partners',  label: 'Partners',  icon: Users },
-      { href: '/directory', label: 'Directory', icon: BookUser },
-      { href: '/network',   label: 'Network inbox', icon: Inbox },
-      { href: '/standings', label: 'Standings', icon: Trophy },
-      { href: '/ask', label: 'Ask the Sector', icon: Sparkles },
-      { href: '/state-of-sector', label: 'State of Sector', icon: FileBarChart },
-      { href: '/showcase',  label: 'Impact map', icon: MapIcon },
-      { href: '/roadmap',   label: 'Next Phase', icon: Rocket },
-      { href: '/tasks',     label: 'Tasks',     icon: ListTodo },
+      { href: '/partners',  label: 'Partners',  labelAr: 'الشركاء', icon: Users },
+      { href: '/directory', label: 'Directory', labelAr: 'الدليل', icon: BookUser },
+      { href: '/network',   label: 'Network inbox', labelAr: 'بريد الشبكة', icon: Inbox },
+      { href: '/standings', label: 'Recognition', labelAr: 'الإنجازات', icon: Trophy },
+      { href: '/ask', label: 'Ask the Sector', labelAr: 'اسأل القطاع', icon: Sparkles },
+      { href: '/state-of-sector', label: 'State of Sector', labelAr: 'حالة القطاع', icon: FileBarChart },
+      { href: '/showcase',  label: 'National counter', labelAr: 'العدّاد الوطني', icon: MapIcon },
+      { href: '/roadmap',   label: 'Next Phase', labelAr: 'المرحلة القادمة', icon: Rocket },
+      { href: '/tasks',     label: 'Tasks',     labelAr: 'المهام', icon: ListTodo },
       // Documents module is inherited from the base platform and still
       // carries its taxonomy (Sci memo / Investor / IP critical). Hidden
       // from the network console until it's re-skinned for the Center —
@@ -125,9 +129,10 @@ const NAV: NavGroupDef[] = [
   },
   {
     label: 'Team',
+    labelAr: 'الفريق',
     items: [
-      { href: '/agents',    label: 'Agents',    icon: Bot },
-      { href: '/team',      label: 'Staff',     icon: Users },
+      { href: '/agents',    label: 'Agents',    labelAr: 'الوكلاء', icon: Bot },
+      { href: '/team',      label: 'Staff',     labelAr: 'الفريق', icon: Users },
     ],
   },
 ];
@@ -230,12 +235,13 @@ export default function Sidebar({
           });
           if (visibleItems.length === 0) return null;
           return (
-            <NavGroup key={gi} label={collapsed ? undefined : group.label}>
+            <NavGroup key={gi} label={collapsed ? undefined : group.label} labelAr={collapsed ? undefined : group.labelAr}>
               {visibleItems.map((item) => (
                 <NavLink
                   key={item.href}
                   href={item.href}
                   label={item.label}
+                  labelAr={item.labelAr}
                   Icon={item.icon}
                   active={isActive(pathname, item.href)}
                   collapsed={collapsed}
@@ -314,12 +320,13 @@ export default function Sidebar({
   );
 }
 
-function NavGroup({ label, children }: { label?: string; children: React.ReactNode }) {
+function NavGroup({ label, labelAr, children }: { label?: string; labelAr?: string; children: React.ReactNode }) {
   return (
     <div>
       {label && (
         <div className="text-[10px] uppercase tracking-[0.18em] text-white/40 px-3 mb-2">
           {label}
+          {labelAr && <span className="ml-1.5 normal-case tracking-normal text-white/35" dir="rtl">{labelAr}</span>}
         </div>
       )}
       <div className="space-y-0.5">{children}</div>
@@ -330,6 +337,7 @@ function NavGroup({ label, children }: { label?: string; children: React.ReactNo
 function NavLink({
   href,
   label,
+  labelAr,
   Icon,
   active,
   collapsed,
@@ -338,6 +346,7 @@ function NavLink({
 }: {
   href: string;
   label: string;
+  labelAr?: string;
   Icon: React.ElementType;
   active: boolean;
   collapsed?: boolean;
@@ -369,7 +378,10 @@ function NavLink({
       />
       {!collapsed && (
         <span className="flex-1 inline-flex items-center justify-between gap-2">
-          <span>{label}</span>
+          <span className="inline-flex items-baseline gap-1.5">
+            <span>{label}</span>
+            {labelAr && <span className="text-[11px] text-white/50" dir="rtl" lang="ar">{labelAr}</span>}
+          </span>
           {trailingPill && (
             <span className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded font-semibold bg-amber-300/20 text-amber-200 border border-amber-300/30">
               {trailingPill}

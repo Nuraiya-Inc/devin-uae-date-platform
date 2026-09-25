@@ -8,6 +8,7 @@ import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { isExec } from '@/lib/access';
 import { generateCertificate } from '@/lib/certificate';
+import { partnerEsgEstimate } from '@/lib/esg';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -40,6 +41,11 @@ export async function GET(
     );
   }
 
+  // M8 — the certificate states the partner's indicative climate
+  // contribution (diverted tons → avoided emissions) alongside tier.
+  const year = new Date().getUTCFullYear();
+  const esg = await partnerEsgEstimate(partner.id, year);
+
   const baseUrl = process.env.NEXTAUTH_URL ?? `https://${req.headers.get('host')}`;
   const pdf = await generateCertificate({
     partnerId: partner.id,
@@ -51,6 +57,8 @@ export async function GET(
     foundingMember: partner.foundingMember,
     issuedAt: new Date(),
     baseUrl,
+    avoidedTCO2e: esg.estAvoidedTCO2e,
+    divertedTons: esg.divertedTons,
   });
 
   await prisma.auditLog.create({

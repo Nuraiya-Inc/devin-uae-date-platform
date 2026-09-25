@@ -12,11 +12,14 @@ import { useState, useRef, useEffect } from 'react';
 interface Turn { role: 'user' | 'agent'; text: string }
 
 const SUGGESTIONS: Array<{ en: string; ar: string; q: string }> = [
-  { en: 'Which emirates are behind on reporting?', ar: 'أي إمارة الأقل التزامًا بالتقارير؟', q: 'Which emirates are behind on reporting this year? Give the participation rate per emirate.' },
-  { en: 'How much residue was diverted this year?', ar: 'كم كمية النواتج المُحوّلة هذا العام؟', q: 'How much palm residue was diverted from burning or burial this year, and what is the diversion rate?' },
-  { en: "What's our estimated climate contribution?", ar: 'ما مساهمتنا المناخية التقديرية؟', q: 'What is the network\'s estimated climate contribution this year and cumulatively? Be clear it is indicative.' },
-  { en: 'Give me a one-paragraph state of the sector.', ar: 'أعطني ملخصًا موجزًا لحالة القطاع.', q: 'Give me a concise one-paragraph state of the sector overview from the live numbers.' },
+  { en: 'Which emirates are behind on reporting?', ar: 'أي إمارة الأقل التزامًا بالتقارير؟', q: 'أي إمارة الأقل التزامًا بالتقارير هذا العام؟ أعطني نسبة المشاركة لكل إمارة.' },
+  { en: 'How much residue was diverted this year?', ar: 'كم كمية النواتج المُحوَّلة هذا العام؟', q: 'كم كمية نواتج النخيل التي حُوِّلت عن الحرق أو الدفن هذا العام، وما نسبة التحويل؟' },
+  { en: "What's our estimated climate contribution?", ar: 'ما مساهمتنا المناخية التقديرية؟', q: 'ما مساهمة الشبكة المناخية التقديرية هذا العام وتراكميًا؟ وضّح أنها تقديرية.' },
+  { en: 'Give me a one-paragraph state of the sector.', ar: 'أعطني ملخصًا موجزًا لحالة القطاع.', q: 'أعطني ملخصًا موجزًا من فقرة واحدة لحالة القطاع من الأرقام الحية.' },
 ];
+
+// Arabic detection for input direction — RTL when the user types Arabic.
+const ARABIC_RE = /[\u0600-\u06FF]/;
 
 export default function AskSectorPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -70,8 +73,8 @@ export default function AskSectorPage() {
               onClick={() => ask(s.q)}
               className="rounded-xl border border-line bg-white p-3 text-left shadow-card transition hover:border-brand-300 hover:shadow-card-hover"
             >
-              <div className="text-sm font-medium text-ink">{s.en}</div>
-              <div className="text-xs text-brand-700" dir="rtl">{s.ar}</div>
+              <div className="text-sm font-medium text-ink" dir="rtl" lang="ar">{s.ar}</div>
+              <div className="text-xs text-muted">{s.en}</div>
             </button>
           ))}
         </div>
@@ -80,7 +83,9 @@ export default function AskSectorPage() {
       <div className="flex-1 space-y-3 overflow-y-auto rounded-2xl border border-line bg-white/60 p-4">
         {turns.map((t, i) => (
           <div key={i} className={t.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
-            <div className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm ${
+            <div
+              dir={ARABIC_RE.test(t.text) ? 'rtl' : 'ltr'}
+              className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm ${
               t.role === 'user' ? 'bg-brand-700 text-white' : 'border border-line bg-white text-ink'
             }`}>
               {t.text}
@@ -107,7 +112,8 @@ export default function AskSectorPage() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(input); } }}
           rows={1}
-          placeholder="Ask about participation, production, diversion, climate contribution…"
+          dir={ARABIC_RE.test(input) ? 'rtl' : 'ltr'}
+          placeholder="اسأل عن المشاركة، الإنتاج، التحويل، المساهمة المناخية…"
           className="min-h-[44px] flex-1 resize-none rounded-xl border border-line bg-white px-3 py-2.5 text-sm outline-none focus:border-brand-400"
         />
         <button
@@ -115,7 +121,7 @@ export default function AskSectorPage() {
           disabled={busy || !input.trim()}
           className="rounded-xl bg-brand-700 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-brand-600 disabled:opacity-40"
         >
-          Ask
+          اسأل
         </button>
       </form>
       <p className="mt-2 text-center text-[11px] text-muted">

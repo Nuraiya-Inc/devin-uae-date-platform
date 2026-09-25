@@ -52,6 +52,9 @@ export interface CertificateInput {
   foundingMember: boolean;
   issuedAt: Date;
   baseUrl: string;
+  /** M8 — climate contribution figures (always indicative). */
+  avoidedTCO2e?: number;
+  divertedTons?: number;
 }
 
 export async function generateCertificate(input: CertificateInput): Promise<Buffer> {
@@ -91,10 +94,13 @@ export async function generateCertificate(input: CertificateInput): Promise<Buff
     const logo = logoBuffer('upn-logo-white.png');
     if (logo) doc.image(logo, W / 2 - 110, 55, { width: 220 });
 
-    // Title
+    // Title — Climate Contribution Certificate (M8)
     const tier = TIER_TITLES[input.tier] ?? TIER_TITLES.REGISTERED;
-    doc.fillColor(GOLD).font('Helvetica').fontSize(12).text('THE NATIONAL CENTER FOR PALMS AND DATES HEREBY RECOGNIZES', 0, 175, {
-      width: W, align: 'center', characterSpacing: 2,
+    doc.fillColor(GOLD).font('Helvetica').fontSize(11).text('CLIMATE CONTRIBUTION CERTIFICATE', 0, 168, {
+      width: W, align: 'center', characterSpacing: 3.2,
+    });
+    doc.fillColor(GOLD).font('Helvetica').fontSize(9).text('THE NATIONAL CENTER FOR PALMS AND DATES HEREBY RECOGNIZES', 0, 184, {
+      width: W, align: 'center', characterSpacing: 1.6,
     });
 
     doc.fillColor(TEAL_950).font('Helvetica-Bold').fontSize(34).text(input.nameEn, 0, 205, { width: W, align: 'center' });
@@ -118,9 +124,23 @@ export async function generateCertificate(input: CertificateInput): Promise<Buff
       });
     }
 
-    doc.fillColor(MUTED).font('Helvetica').fontSize(11).text(
-      'as a partner in good standing of the UAE Palm Network, in recognition of verified quarterly reporting\nand contribution to the Emirates’ agricultural goals and food-security map.',
-      0, 405, { width: W, align: 'center', lineGap: 3 },
+    // Climate contribution line — the measured figure that makes this
+    // certificate a *contribution* certificate, not just membership.
+    if (typeof input.avoidedTCO2e === 'number' && input.avoidedTCO2e > 0) {
+      doc.fillColor(TEAL_700).font('Helvetica-Bold').fontSize(13).text(
+        `${(input.divertedTons ?? 0).toLocaleString('en-US')} tons diverted · ~${input.avoidedTCO2e.toLocaleString('en-US')} tCO₂e avoided (indicative)`,
+        0, 404, { width: W, align: 'center' },
+      );
+    }
+
+    doc.fillColor(MUTED).font('Helvetica').fontSize(10.5).text(
+      'as a partner in good standing of the UAE Palm Network, in recognition of verified quarterly reporting and measured\nresidue diversion contributing to UAE Net Zero 2050, the Circular Economy Policy 2021–2031, and Food Security 2051.',
+      0, 424, { width: W, align: 'center', lineGap: 3 },
+    );
+
+    doc.fillColor(MUTED).font('Helvetica-Oblique').fontSize(7.5).text(
+      'Avoided-emission figures are indicative estimates from measured tonnage — not verified carbon credits.',
+      0, 456, { width: W, align: 'center' },
     );
 
     // Footer row: date + signature line + annual seal + QR
