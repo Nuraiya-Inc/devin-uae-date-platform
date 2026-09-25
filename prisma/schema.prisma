@@ -1,0 +1,1962 @@
+// =============================================================
+// Safa BioWorks platform — Prisma schema
+//
+// Multi-agent AI platform for an integrated platform chemicals
+// manufacturer. Two operating entities (Safa BioWorks FZE / JAFZA,
+// Safa BioWorks Inc. / US) with Chemplax LLC kept strictly separate.
+//
+// Phase 1: 500 TPA pilot at SRTIP, funded by $12M Series A @ $30M pre.
+// Phase 2-5: scale to $260M CAPEX, $60-78M/yr steady-state revenue.
+//
+// Schema borrows heavily from a reference architecture (Acquired
+// Woodford) but is tuned for chemicals: multi-entity context,
+// multi-currency, IP-sensitive documents with per-agent ACLs,
+// investor / partner pipeline as first-class objects.
+// =============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -------------------------------------------------------------
+// Entities — Safa runs across FZE (UAE), Inc. (US), with Chemplax
+// kept STRICTLY SEPARATE. Any data touching Chemplax is flagged
+// at the row level to prevent accidental cross-reference in
+// agent outputs.
+// -------------------------------------------------------------
+
+enum SafaEntity {
+  FZE       // Safa BioWorks FZE — JAFZA, UAE (primary operating entity)
+  INC       // Safa BioWorks Inc. — US corporation
+  CHEMPLAX  // Chemplax LLC, Tennessee — kept SEPARATE from Safa comms
+  GROUP     // Cross-entity / consolidated
+}
+
+enum Currency {
+  AED
+  USD
+  EUR
+  GBP
+}
+
+// -------------------------------------------------------------
+// People & access
+// -------------------------------------------------------------
+
+enum UserRole {
+  CEO          // Nima — top of chain, sees everything
+  MD           // Managing Director agent operator / human deputy
+  AGENT_OWNER  // Lead human counterpart for a branch / functional agent
+  TEAM_MEMBER  // Functional staff under an agent
+  CONTRACTOR   // External contributor — read-mostly (outside counsel, external auditor)
+  VIEWER       // Read-only stakeholder (investor, board observer)
+}
+
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique
+  name            String
+  passwordHash    String
+  role            UserRole   @default(TEAM_MEMBER)
+  title           String?
+  phone           String?
+
+  /// Which Safa entity this person sits in by default. Cross-entity
+  /// permissions are explicit via `canAccessAllEntities`.
+  entity                SafaEntity @default(FZE)
+  /// Exec override — view across entities. CEO + MD get true by default.
+  canAccessAllEntities  Boolean    @default(false)
+
+  /// E.164 WhatsApp number — Phase 2 feature
+  whatsappNumber              String?  @unique
+  whatsappNotify              Boolean  @default(true)
+  whatsappNotifyTaskAssigned  Boolean  @default(true)
+  whatsappNotifyAgentPings    Boolean  @default(true)
+
+  avatarUrl       String?
+  isActive        Boolean    @default(true)
+  lastLoginAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  // Reporting line — each user reports to one agent's "branch"
+  reportsToAgentId String?
+  reportsToAgent   Agent?    @relation("AgentBranchMembers", fields: [reportsToAgentId], references: [id])
+
+  /// Per-user agent ACL overrides
+  canAccessAllAgents Boolean  @default(false)
+  extraAgentIds      String[] @default([])
+
+  /// Which agent branches this user is authorized to REVIEW documents from.
+  /// Empty = not a reviewer. Non-empty = sees the /review queue for items
+  /// from any agent in these branches. CEO/MD see everything regardless
+  /// (see access.ts:isExec). Examples:
+  ///   Saqib (financial advisor) → [FINANCE, OPERATIONS]
+  ///   Zara (CTO ops)            → [TECHNOLOGY]
+  ///   Kelvin (CTO ops)          → [TECHNOLOGY]
+  reviewerForBranches  AgentBranch[] @default([])
+
+  // Relationships
+  partner          Partner?
+  ownedAgent       Agent?            @relation("AgentHumanOwner")
+  activityEvents      ActivityEvent[]               @relation("ActivityActorUser")
+  notificationPrefs   UserNotificationPreference?
+  authoredTasks    Task[]            @relation("TaskAuthor")
+  assignedTasks    Task[]            @relation("TaskAssignee")
+  threads          ChatThread[]
+  messages         Message[]
+  auditEvents      AuditLog[]
+  documents        Document[]
+  sessions         Session[]
+  addedContacts    Contact[]         @relation("ContactAddedBy")
+  recordedInteractions Interaction[] @relation("InteractionRecordedBy")
+  channelMemberships   ChannelMember[]
+  createdChannels      Channel[]     @relation("ChannelCreatedBy")
+  authoredChannelMessages ChannelMessage[] @relation("ChannelMessageAuthorUser")
+  ownedRaidEntries     RaidEntry[]   @relation("RaidOwnerUser")
+  raisedRaidEntries    RaidEntry[]   @relation("RaidRaisedByUser")
+  approvalsRequested   ApprovalRequest[] @relation("ApprovalRequester")
+  approvalsDecided     ApprovalRequest[] @relation("ApprovalDecidedBy")
+  documentReviewsRequested DocumentReview[] @relation("DocumentReviewRequester")
+  documentReviewsDecided   DocumentReview[] @relation("DocumentReviewDecidedBy")
+  weeklyThemesSet      WeeklyTheme[] @relation("WeeklyThemeSetBy")
+  investorAccessTokensCreated InvestorAccessToken[] @relation("InvestorAccessTokenCreator")
+  humanDependencyEntries DataRoomEntry[]  @relation("EntryHumanDependencyOwner")
+  taskComments         TaskComment[] @relation("TaskCommentAuthorUser")
+  // Investor relations
+  investorTouches      InvestorTouch[] @relation("InvestorTouchByUser")
+  // Data room
+  createdDataRooms      DataRoom[]          @relation("DataRoomCreator")
+  addedDataRoomEntries  DataRoomEntry[]     @relation("DataRoomEntryAddedBy")
+  addedDataRoomFiles    DataRoomEntryFile[] @relation("DataRoomEntryFileAddedBy")
+
+  @@index([reportsToAgentId])
+  @@index([entity])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// -------------------------------------------------------------
+// Agents — the multi-agent runtime
+//
+// Tier 0 = Orchestrator (MD) — one row, sits above everything
+// Tier 1 = C-suite branch heads (CFO, CTO, CCO, CMO, COO)
+// Tier 2 = Functional specialists
+// -------------------------------------------------------------
+
+enum AgentTier {
+  ORCHESTRATOR  // MD — Tier 0
+  EXECUTIVE     // CFO/CTO/CCO/CMO/COO — Tier 1
+  FUNCTIONAL    // All Tier 2 specialists
+}
+
+enum AgentBranch {
+  EXECUTIVE
+  FINANCE
+  TECHNOLOGY
+  COMMERCIAL
+  MARKETING
+  OPERATIONS
+}
+
+model Agent {
+  id                String      @id @default(cuid())
+  /// Registry ID from the agent registry xlsx (e.g. "md-00", "fin-01", "tech-04")
+  slug              String      @unique
+  /// Display name — "Managing Director", "Fundraising & Capital Strategy"
+  name              String
+  title             String
+  tier              AgentTier
+  branch            AgentBranch
+  /// Slug of the agent this one reports to. Null for MD (orchestrator).
+  reportsToSlug     String?
+  /// 1-sentence mandate
+  mission           String
+  /// Markdown — what this agent can decide without escalation
+  decisionRights    String
+  /// Markdown — day-to-day workstream
+  responsibilities  String
+  /// Markdown — numeric, dated KPIs
+  kpis              String
+  /// Markdown — tool / MCP inventory
+  tools             String
+  /// Verbatim system prompt fed to the Anthropic API
+  systemPrompt      String
+  /// Optional override for the daily-cron brief (Phase 2 feature)
+  dailyRunBrief     String?
+  model             String      @default("claude-sonnet-4-6")
+  temperature       Float       @default(0.4)
+  isActive          Boolean     @default(true)
+  /// Cron-driven autonomous runs. Off by default; enabled per agent.
+  dailyRunEnabled   Boolean     @default(false)
+  /// Deployment phase per the registry — 1 = ship now, 2 = post-Series A, 3 = scale-up
+  deployPhase       Int         @default(1)
+  ownerUserId       String?     @unique
+  ownerUser         User?       @relation("AgentHumanOwner", fields: [ownerUserId], references: [id])
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  threads        ChatThread[]
+  messages       Message[]
+  ownedProjects  Project[]
+  ownedTasks     Task[]       @relation("TaskAgentOwner")
+  authoredTasks  Task[]       @relation("TaskAgentAuthor")
+  ownedRaidEntries  RaidEntry[] @relation("RaidOwnerAgent")
+  raisedRaidEntries RaidEntry[] @relation("RaidRaisedByAgent")
+  branchMembers     User[]    @relation("AgentBranchMembers")
+  recommendedContacts Contact[] @relation("AgentRecommendedContacts")
+  relayedInteractions Interaction[] @relation("AgentInteractionsRelayed")
+  channelMemberships  ChannelAgent[]
+  authoredChannelMessages ChannelMessage[] @relation("ChannelMessageAuthorAgent")
+  auditLogs           AuditLog[]
+  runs                AgentRun[]
+  approvalRequests    ApprovalRequest[]
+  documentReviews     DocumentReview[]  @relation("DocumentReviewRequesterAgent")
+  taskComments        TaskComment[]    @relation("TaskCommentAuthorAgent")
+  hostedChannels      Channel[]        @relation("ChannelDefaultResponder")
+  // Investor relations — agents (FIN-01, FIN-02) own investor touches
+  investorTouches     InvestorTouch[]  @relation("InvestorTouchByAgent")
+  activityEvents      ActivityEvent[]  @relation("ActivityActorAgent")
+
+  @@index([branch])
+  @@index([tier])
+  @@index([deployPhase])
+}
+
+// -------------------------------------------------------------
+// Agent runs — autonomous (cron) + mandated invocations
+// -------------------------------------------------------------
+
+enum AgentRunKind {
+  DAILY
+  MANDATED
+  EVENT
+}
+
+model AgentRun {
+  id            String       @id @default(cuid())
+  agentId       String
+  kind          AgentRunKind
+  trigger       String
+  brief         String       @db.Text
+  output        String       @db.Text @default("")
+  stayedSilent  Boolean      @default(false)
+  actions       Json         @default("{}")
+  errorMessage  String?
+  tokensIn      Int?
+  tokensOut     Int?
+  cachedTokensIn Int?        // for Anthropic prompt caching observability
+  modelUsed     String?
+  durationMs    Int?
+  mandatedByAgentId String?
+  parentRunId   String?
+  createdAt     DateTime     @default(now())
+
+  agent         Agent        @relation(fields: [agentId], references: [id])
+  approvalRequests ApprovalRequest[]
+
+  @@index([agentId, createdAt])
+  @@index([kind, createdAt])
+}
+
+// -------------------------------------------------------------
+// Approvals — human-in-the-loop guardrail.
+// Action tools that touch named partners, investor data, IP-sensitive
+// docs, or anything in Nima's voice route here before executing.
+// -------------------------------------------------------------
+
+enum ApprovalKind {
+  DELETE_TASK
+  NOTIFY_USER
+  LOG_RAID_CRITICAL
+  POST_TO_SENSITIVE_CHANNEL
+  READ_RESTRICTED_DOCUMENT
+  EXTERNAL_COMMUNICATION    // any draft email/LinkedIn for a named investor or partner
+  PARTNER_LANGUAGE          // legacy (inherited runtime)
+  IP_DISCLOSURE             // legacy (inherited runtime)
+  TIER_CHANGE               // NCPD: tier/standing change drafted by CER-01 — official approval applies it
+  REGISTRY_CHANGE           // NCPD: public registry change set drafted by REG-01
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTE_FAILED
+  EXPIRED
+}
+
+enum ApprovalSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model ApprovalRequest {
+  id              String           @id @default(cuid())
+  kind            ApprovalKind
+  status          ApprovalStatus   @default(PENDING)
+  severity        ApprovalSeverity @default(MEDIUM)
+
+  agentId         String
+  agent           Agent            @relation(fields: [agentId], references: [id])
+  requesterUserId String?
+  requesterUser   User?            @relation("ApprovalRequester", fields: [requesterUserId], references: [id])
+
+  threadId        String?
+  thread          ChatThread?      @relation(fields: [threadId], references: [id])
+  messageId       String?
+  message         Message?         @relation(fields: [messageId], references: [id])
+  runId           String?
+  run             AgentRun?        @relation(fields: [runId], references: [id])
+
+  summary         String
+  detail          String?          @db.Text
+  payload         Json
+  result          Json?
+  rejectReason    String?
+
+  decidedById     String?
+  decidedBy       User?            @relation("ApprovalDecidedBy", fields: [decidedById], references: [id])
+  decidedAt       DateTime?
+  /// Auto-expire after 7 days
+  expiresAt       DateTime
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([status, createdAt])
+  @@index([agentId, status])
+  @@index([requesterUserId, status])
+  @@index([threadId])
+}
+
+// -------------------------------------------------------------
+// Weekly theme — Layer 4 of the agent platform cohesion model.
+//
+// One row per ISO week (Monday-anchored). The text is injected into
+// EVERY agent's system prompt next to the date block, so all 18 agents
+// bias their morning work toward the same focus. Set by the CEO/MD via
+// a small CLI script (scripts/set-weekly-theme.ts) or, later, a UI.
+//
+// Why this matters: without a shared theme, 18 agents produce 18 work
+// products of independent value. With one, they produce 18 work
+// products that compound toward a shared objective.
+// -------------------------------------------------------------
+
+model WeeklyTheme {
+  id        String   @id @default(cuid())
+  /// Monday of the ISO week this theme applies to. Stored as a date
+  /// (no time component) so the unique constraint catches duplicates.
+  weekStart DateTime @db.Date
+  /// The headline. Short and operational, e.g. "Series A close-prep week",
+  /// "Emirates Biotech LOI push", "Audit-readiness sprint."
+  theme     String   @db.Text
+  /// Optional explanation that shows up alongside the theme. Agents read
+  /// this to understand HOW to bias their work, not just WHAT toward.
+  rationale String?  @db.Text
+  setById   String?
+  setBy     User?    @relation("WeeklyThemeSetBy", fields: [setById], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([weekStart])
+  @@index([weekStart(sort: Desc)])
+}
+
+// -------------------------------------------------------------
+// Document review — gate between "agent created a doc and wants to
+// promote it to the data room" and "the doc is actually visible to
+// investors in the room." Distinct from ApprovalRequest above:
+//
+//   - ApprovalRequest gates AGENT ACTIONS (external email, partner
+//     language, etc.) — single decider, ~7d expiry.
+//
+//   - DocumentReview gates AGENT DOCUMENTS — routes by the creator
+//     agent's branch to one of several reviewers, never expires
+//     (pending = pending until acted on), supports both BLOCK
+//     (promotion held until approved) and ANNOTATE (promotion
+//     happens immediately, badge shows pending until reviewed).
+//
+// Routing: reviewers are users with reviewerForBranches containing
+// the creator agent's branch. CEO/MD always see everything.
+// -------------------------------------------------------------
+
+enum ReviewGate {
+  BLOCK      // promotion held until approved
+  ANNOTATE   // promoted with "pending review" badge; reviewer can revoke after
+}
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVOKED    // post-promotion revoke (only valid when gate=ANNOTATE)
+}
+
+model DocumentReview {
+  id                  String        @id @default(cuid())
+  documentId          String
+  document            Document      @relation(fields: [documentId], references: [id])
+
+  /// The agent that created the doc and called promote_to_dataroom.
+  requesterAgentId    String?
+  requesterAgent      Agent?        @relation("DocumentReviewRequesterAgent", fields: [requesterAgentId], references: [id])
+  /// The user who triggered the agent run (for audit). Usually CEO.
+  requesterUserId     String?
+  requesterUser       User?         @relation("DocumentReviewRequester", fields: [requesterUserId], references: [id])
+
+  /// Where the doc is destined in the data room. For BLOCK reviews the
+  /// promotion executes only on APPROVED. For ANNOTATE the promotion
+  /// already happened; these fields point at it for context.
+  targetRoomSlug      String
+  targetRefNumber     String
+  targetEntryId       String?       // resolved DataRoomEntry id at time of request
+  targetStatus        String        // EXISTS | IN_PROGRESS | VERIFY | PARTIAL
+  targetVersion       String?
+
+  /// Gate + status drive UI affordances.
+  gate                ReviewGate
+  status              ReviewStatus  @default(PENDING)
+
+  /// Which branches' reviewers can decide this review. Denormalized at
+  /// create time so the queue query doesn't need to join through Agent.
+  allowedBranches     AgentBranch[]
+
+  /// Snapshot of why this came to review — the agent's one-line claim
+  /// of what they shipped, plus the fact-check warnings (if any) that
+  /// triggered the BLOCK.
+  summary             String        @db.Text
+  factCheckWarnings   Json?
+
+  decidedById         String?
+  decidedBy           User?         @relation("DocumentReviewDecidedBy", fields: [decidedById], references: [id])
+  decidedAt           DateTime?
+  /// Free-text reviewer notes — shown back to the agent on rejection,
+  /// and recorded in audit for accepted approvals too.
+  decisionNotes       String?       @db.Text
+
+  /// Random URL-safe token for signed approve/reject deep links sent
+  /// in the reviewer email. Reviewers can act from their phone without
+  /// a full login session. Validated server-side against this column.
+  decisionToken       String        @unique @default(cuid())
+
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  @@index([status, createdAt])
+  @@index([documentId])
+  @@index([requesterAgentId, status])
+  @@index([gate, status])
+}
+
+// -------------------------------------------------------------
+// Projects — Safa runs as one consolidated build-out programme
+// with five phases (per the business plan): Phase 1 pilot at SRTIP
+// through Phase 5 commercial-scale. Tasks roll up to phases.
+// -------------------------------------------------------------
+
+enum ProjectStatus {
+  PLANNING
+  IN_FLIGHT
+  AT_RISK
+  BLOCKED
+  COMPLETE
+  ON_HOLD
+}
+
+enum RagStatus {
+  GREEN
+  AMBER
+  RED
+  UNSET
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  IN_REVIEW
+  DONE
+  CANCELLED
+}
+
+enum Priority {
+  P0
+  P1
+  P2
+  P3
+}
+
+model Project {
+  id            String         @id @default(cuid())
+  name          String
+  slug          String         @unique
+  description   String?
+  status        ProjectStatus  @default(PLANNING)
+  startDate     DateTime?
+  targetEndDate DateTime?
+  ownerAgentId  String?
+  ownerAgent    Agent?         @relation(fields: [ownerAgentId], references: [id])
+  /// Which entity owns the project ($ amounts denominated in `currency`)
+  entity        SafaEntity     @default(FZE)
+  budget        Decimal?       @db.Decimal(14, 2)
+  spent         Decimal?       @db.Decimal(14, 2)
+  currency      Currency       @default(USD)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  phases        Phase[]
+  tasks         Task[]
+  milestones    Milestone[]
+  documents     Document[]
+  raidEntries   RaidEntry[]
+}
+
+model Phase {
+  id           String    @id @default(cuid())
+  projectId    String
+  name         String
+  description  String?
+  /// 1-5 corresponds to Safa build-out phases per the BP
+  ordering     Int
+  startDate    DateTime?
+  endDate      DateTime?
+  ragStatus    RagStatus @default(UNSET)
+  ragNote      String?
+  ragSetById   String?
+  ragSetAt     DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks        Task[]
+  milestones   Milestone[]
+  raidEntries  RaidEntry[]
+
+  @@index([projectId, ordering])
+}
+
+model Milestone {
+  id          String   @id @default(cuid())
+  projectId   String
+  phaseId     String?
+  name        String
+  dueDate     DateTime
+  isHit       Boolean  @default(false)
+  hitOn       DateTime?
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase       Phase?   @relation(fields: [phaseId], references: [id])
+
+  @@index([projectId, dueDate])
+}
+
+// -------------------------------------------------------------
+// RAID — Risks / Assumptions / Issues / Dependencies
+// -------------------------------------------------------------
+
+enum RaidKind {
+  RISK
+  ASSUMPTION
+  ISSUE
+  DEPENDENCY
+}
+
+enum RaidStatus {
+  OPEN
+  MITIGATING
+  CLOSED
+}
+
+enum RaidSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RaidProbability {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model RaidEntry {
+  id              String          @id @default(cuid())
+  projectId       String?
+  phaseId         String?
+  kind            RaidKind
+  title           String
+  description     String?         @db.Text
+  ownerAgentId    String?
+  ownerUserId     String?
+  raisedByAgentId String?
+  raisedByUserId  String?
+  status          RaidStatus      @default(OPEN)
+  severity        RaidSeverity    @default(MEDIUM)
+  probability     RaidProbability @default(LOW)
+  mitigation      String?         @db.Text
+  reviewAt        DateTime?
+  closedAt        DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  project       Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase         Phase?    @relation(fields: [phaseId], references: [id])
+  ownerAgent    Agent?    @relation("RaidOwnerAgent", fields: [ownerAgentId], references: [id])
+  ownerUser     User?     @relation("RaidOwnerUser", fields: [ownerUserId], references: [id])
+  raisedByAgent Agent?    @relation("RaidRaisedByAgent", fields: [raisedByAgentId], references: [id])
+  raisedByUser  User?     @relation("RaidRaisedByUser", fields: [raisedByUserId], references: [id])
+
+  @@index([projectId, status, kind])
+  @@index([reviewAt])
+}
+
+model Task {
+  id              String      @id @default(cuid())
+  projectId       String
+  phaseId         String?
+  title           String
+  description     String?
+  status          TaskStatus  @default(TODO)
+  priority        Priority    @default(P2)
+  dueDate         DateTime?
+  startDate       DateTime?
+  completedAt     DateTime?
+  estimateHours   Float?
+  actualHours     Float?
+
+  ownerAgentId    String?
+  ownerAgent      Agent?      @relation("TaskAgentOwner", fields: [ownerAgentId], references: [id])
+  assigneeUserId  String?
+  assignee        User?       @relation("TaskAssignee", fields: [assigneeUserId], references: [id])
+  authorUserId    String?
+  author          User?       @relation("TaskAuthor", fields: [authorUserId], references: [id])
+  authorAgentId   String?
+  authorAgent     Agent?      @relation("TaskAgentAuthor", fields: [authorAgentId], references: [id])
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  lastActivityAt  DateTime    @default(now())
+
+  project         Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase           Phase?      @relation(fields: [phaseId], references: [id])
+  comments        TaskComment[]
+
+  @@index([projectId, status])
+  @@index([assigneeUserId])
+  @@index([ownerAgentId])
+  @@index([lastActivityAt])
+}
+
+model TaskComment {
+  id           String   @id @default(cuid())
+  taskId       String
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorUserId String?
+  authorUser   User?    @relation("TaskCommentAuthorUser", fields: [authorUserId], references: [id])
+  authorAgentId String?
+  authorAgent  Agent?   @relation("TaskCommentAuthorAgent", fields: [authorAgentId], references: [id])
+  kind         String   @default("comment")
+  body         String   @db.Text
+  mentionedAgents String[] @default([])
+  mentionedUsers  String[] @default([])
+  isDrafting   Boolean  @default(false)
+  isFailed     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([taskId, createdAt])
+}
+
+// -------------------------------------------------------------
+// Chat — 1:1 user <-> agent threads
+// -------------------------------------------------------------
+
+model ChatThread {
+  id         String     @id @default(cuid())
+  agentId    String
+  userId     String
+  title      String     @default("New conversation")
+  isPinned   Boolean    @default(false)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  agent      Agent      @relation(fields: [agentId], references: [id])
+  user       User       @relation(fields: [userId], references: [id])
+  messages   Message[]
+  approvalRequests ApprovalRequest[]
+
+  /// Single thread per (user, agent) by convention — DB-enforced.
+  @@unique([userId, agentId])
+  @@index([userId])
+  @@index([agentId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+model Message {
+  id          String       @id @default(cuid())
+  threadId    String
+  role        MessageRole
+  content     String       @db.Text
+  agentId     String?
+  userId      String?
+  tokensIn    Int?
+  tokensOut   Int?
+  cachedTokensIn Int?
+  modelUsed   String?
+  /// Idempotency key — Twilio MessageSid, etc.
+  externalId  String?      @unique
+  /// "web" | "whatsapp" | "email"
+  channel     String       @default("web")
+  /// "brainstorm" | "execute"
+  mode        String?
+  /// Transparency panel data — tools used, docs read, tasks created, etc.
+  toolsUsed   Json?
+  /// Document ids attached to THIS message (user side). Renders as chips on
+  /// the message bubble; the actual content is fed into the model's user
+  /// content block during the same turn.
+  attachmentDocIds String[] @default([])
+  createdAt   DateTime     @default(now())
+
+  thread      ChatThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  agent       Agent?       @relation(fields: [agentId], references: [id])
+  user        User?        @relation(fields: [userId], references: [id])
+  approvalRequests ApprovalRequest[]
+
+  @@index([threadId, createdAt])
+}
+
+// -------------------------------------------------------------
+// Documents — IP-SENSITIVE.
+//
+// Critical difference vs the reference architecture: every document
+// has explicit ipSensitivity + projectScope. The read_document tool
+// MUST check the calling agent's branch/tier against these before
+// returning content. Strain selection memos do NOT belong in the
+// Outreach agent's context.
+// -------------------------------------------------------------
+
+enum DocumentKind {
+  PITCH_DECK
+  BUSINESS_PLAN
+  FINANCIAL_MODEL
+  INVESTOR_UPDATE
+  TERM_SHEET
+  CONTRACT
+  LOI
+  NDA
+  REGULATORY_DOSSIER
+  SCIENTIFIC_MEMO          // strain selection, pretreatment, process IP
+  SOP                      // standard operating procedure
+  HSE_REPORT
+  BOARD_PACK
+  LEGAL_OPINION
+  POLICY
+  GENERAL
+}
+
+enum IpSensitivity {
+  PUBLIC                   // marketing, press releases — safe to share widely
+  INTERNAL                 // ops, finance, board — internal only
+  COMMERCIAL_SENSITIVE     // partner negotiations, pricing — restricted to commercial branch + exec
+  IP_CRITICAL              // strain / pretreatment / process IP — TECH + exec only
+  INVESTOR_RESTRICTED      // term sheets, cap table — CFO + exec only
+}
+
+model Document {
+  id           String        @id @default(cuid())
+  title        String
+  kind         DocumentKind
+  url          String?
+  storagePath  String?
+  mimeType     String?
+  sizeBytes    Int?
+  notes        String?
+  projectId    String?
+  uploaderId   String
+
+  /// IP / commercial sensitivity — gates which agents can read this
+  ipSensitivity        IpSensitivity @default(INTERNAL)
+  /// Which entity owns this doc. CHEMPLAX docs MUST NOT leak into Safa context.
+  entity               SafaEntity    @default(FZE)
+  /// Branches allowed to read this doc beyond the default ACL.
+  /// Empty = default (per ipSensitivity); non-empty = explicit allowlist.
+  allowedBranches      AgentBranch[] @default([])
+
+  tags                 String[]  @default([])
+  extractedText        String?   @db.Text
+  aiSummary            String?
+  aiTitleSuggestion    String?
+  aiKindSuggestion     DocumentKind?
+  aiAnalyzedAt         DateTime?
+  aiAnalysisPending    Boolean   @default(false)
+  /// For agent-generated docx/pptx: the structured generation spec
+  /// (GenerateDocxInput / GeneratePptxInput) so edit_docx / edit_pptx can
+  /// apply targeted changes and regenerate without formatting drift.
+  /// Null for uploads and non-generated documents.
+  generationSpec       Json?
+  createdAt            DateTime  @default(now())
+
+  project      Project?      @relation(fields: [projectId], references: [id])
+  uploader     User          @relation(fields: [uploaderId], references: [id])
+  /// Data room entries that link THIS document into a curated folder (primary slot)
+  dataRoomEntries DataRoomEntry[] @relation("DataRoomEntryDocument")
+  /// Additional (non-primary) attachments — same doc can attach to multiple entries
+  /// via join rows (e.g. "Signed copy", "v2 draft", "Arabic translation").
+  dataRoomEntryAttachments DataRoomEntryFile[]
+
+  /// Review history for this document (agent-generated → review queue gate).
+  /// Multiple rows exist if a doc is revised + re-reviewed.
+  reviews              DocumentReview[]
+
+  @@index([projectId])
+  @@index([uploaderId])
+  @@index([kind])
+  @@index([ipSensitivity])
+  @@index([entity])
+}
+
+// -------------------------------------------------------------
+// Channels — multi-party rooms (humans + agents)
+// -------------------------------------------------------------
+
+model Channel {
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  name         String
+  description  String?
+  isLeadership Boolean  @default(false)
+  createdById  String
+  createdBy    User     @relation("ChannelCreatedBy", fields: [createdById], references: [id])
+  defaultResponderAgentId String?
+  defaultResponderAgent   Agent?  @relation("ChannelDefaultResponder", fields: [defaultResponderAgentId], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  members  ChannelMember[]
+  agents   ChannelAgent[]
+  messages ChannelMessage[]
+
+  @@index([slug])
+  @@index([defaultResponderAgentId])
+}
+
+model ChannelMember {
+  channelId  String
+  userId     String
+  role       String   @default("member")
+  joinedAt   DateTime @default(now())
+  lastReadAt DateTime?
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([channelId, userId])
+  @@index([userId])
+}
+
+model ChannelAgent {
+  channelId String
+  agentId   String
+  isActive  Boolean  @default(true)
+  addedAt   DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  agent   Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([channelId, agentId])
+}
+
+model ChannelMessage {
+  id              String   @id @default(cuid())
+  channelId       String
+  authorUserId    String?
+  authorAgentId   String?
+  body            String   @db.Text
+  mentionedAgents String[] @default([])
+  mentionedUsers  String[] @default([])
+  authorKind      String
+  isAutoReply     Boolean  @default(false)
+  isDrafting      Boolean  @default(false)
+  isFailed        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  channel     Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  authorUser  User?   @relation("ChannelMessageAuthorUser", fields: [authorUserId], references: [id])
+  authorAgent Agent?  @relation("ChannelMessageAuthorAgent", fields: [authorAgentId], references: [id])
+
+  @@index([channelId, createdAt])
+}
+
+// -------------------------------------------------------------
+// Address book — staff, partners, suppliers, advisors
+// -------------------------------------------------------------
+
+enum ContactKind {
+  STAFF
+  SUPPLIER
+  CONTRACTOR
+  CONSULTANT
+  LAWYER
+  ACCOUNTANT
+  AGENCY
+  INVESTOR
+  BANKER
+  PARTNER       // Emirates Biotech, Agthia, Almarai, QEERI etc.
+  GOVERNMENT    // MOIAT, JAFZA, ADCAB, USDA contacts
+  ACADEMIC      // QEERI researchers, university PIs
+  JOURNALIST
+  OTHER
+}
+
+enum InteractionKind {
+  CALL
+  EMAIL
+  MEETING
+  MESSAGE
+  NOTE
+  PROPOSAL
+  CONTRACT
+  PAYMENT
+  SAMPLE_SENT      // for partner/customer
+  SAMPLE_RECEIVED
+  DUE_DILIGENCE
+}
+
+model Contact {
+  id           String       @id @default(cuid())
+  name         String
+  company      String?
+  title        String?
+  email        String?
+  phone        String?
+  website      String?
+  address      String?
+  kind         ContactKind  @default(OTHER)
+  tags         String[]     @default([])
+  notes        String?
+  isActive     Boolean      @default(true)
+
+  recommendedByAgentId  String?
+  recommendedByAgent    Agent?  @relation("AgentRecommendedContacts", fields: [recommendedByAgentId], references: [id])
+  recommendationContext String?
+
+  addedByUserId String
+  addedByUser   User   @relation("ContactAddedBy", fields: [addedByUserId], references: [id])
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  interactions Interaction[]
+
+  @@index([kind])
+  @@index([recommendedByAgentId])
+  @@index([addedByUserId])
+}
+
+model Interaction {
+  id            String          @id @default(cuid())
+  contactId     String
+  contact       Contact         @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  kind          InteractionKind @default(NOTE)
+  summary       String          @db.Text
+  occurredAt    DateTime        @default(now())
+  recordedById  String
+  recordedBy    User            @relation("InteractionRecordedBy", fields: [recordedById], references: [id])
+  agentId       String?
+  agent         Agent?          @relation("AgentInteractionsRelayed", fields: [agentId], references: [id])
+  createdAt     DateTime        @default(now())
+
+  @@index([contactId, occurredAt])
+  @@index([recordedById])
+}
+
+// -------------------------------------------------------------
+// Investor pipeline — first-class objects (fundraising is core to
+// Safa right now; this isn't a generic CRM, it's structured for IC).
+// -------------------------------------------------------------
+
+enum InvestorStage {
+  IDENTIFIED       // on the long list
+  INTRODUCED       // warm intro made or cold email sent
+  FIRST_MEETING    // initial conversation scheduled/held
+  DEEP_DIVE        // sharing materials, follow-up meetings
+  DD               // formal diligence in progress
+  IC_REVIEW        // their IC is reviewing
+  TERM_SHEET       // term sheet issued
+  CLOSING          // legals running
+  CLOSED           // wired in
+  PASSED           // they passed
+  STALLED          // no response > 30 days
+}
+
+enum InvestorArchetype {
+  REGIONAL_VC          // Al Jazira Capital, Vickers, etc.
+  CORPORATE_VENTURE    // Mubadala, Aramco Ventures
+  SOVEREIGN_DEV        // ADIA, QIA, QDB, ADQ, sovereign-linked
+  STRATEGIC            // PLA producers, lactic acid players
+  FAMILY_OFFICE
+  GRANT_FUND           // CBE JU, EU Horizon, MOIAT R&D
+  ANGEL                // typically not for Safa but allow
+}
+
+model Investor {
+  id              String              @id @default(cuid())
+  name            String
+  archetype       InvestorArchetype
+  stage           InvestorStage       @default(IDENTIFIED)
+  geo             String?             // "UAE", "Qatar", "Singapore", etc.
+  /// Ticket range USD min/max
+  ticketMinUsd    Decimal?            @db.Decimal(14, 2)
+  ticketMaxUsd    Decimal?            @db.Decimal(14, 2)
+  /// Fit/notes — pitch angle, theses, decision makers
+  thesis          String?             @db.Text
+  /// Who introduced us — free-form (e.g. "Raj Michael")
+  introSource     String?
+  /// Owning agent (typically FIN-01 pre-close, FIN-02 post-close)
+  ownerAgentId    String?
+  isActive        Boolean             @default(true)
+  stalledAt       DateTime?
+  closedAt        DateTime?
+  passedAt        DateTime?
+  passedReason    String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  touches         InvestorTouch[]
+  contacts        InvestorContact[]
+  accessTokens    InvestorAccessToken[]
+
+  @@index([stage])
+  @@index([archetype])
+}
+
+/// Access tier for an investor read-only token. Gates which docs the
+/// investor can see based on Document.ipSensitivity.
+///   PUBLIC_ONLY        → only IpSensitivity.PUBLIC
+///   INVESTOR_STANDARD  → PUBLIC + INVESTOR_RESTRICTED (the default share)
+///   DILIGENCE_FULL     → PUBLIC + INVESTOR_RESTRICTED + INTERNAL +
+///                        COMMERCIAL_SENSITIVE (for DD-stage lead)
+/// IP_CRITICAL (strain / pretreatment / process) is NEVER shared via
+/// investor tokens — there's no tier that grants it. Period.
+enum InvestorAccessTier {
+  PUBLIC_ONLY
+  INVESTOR_STANDARD
+  DILIGENCE_FULL
+}
+
+/// Per-investor read-only access token. CEO mints one per investor with
+/// the appropriate tier + expiry; investor visits /investor/[token],
+/// click-throughs the NDA on first visit, then browses the read-only
+/// data room. Every page hit + every doc download is audit-logged.
+///
+/// Revocation: set `revokedAt` to invalidate without deleting (we keep
+/// the access trail for diligence integrity).
+model InvestorAccessToken {
+  id                  String   @id @default(cuid())
+  /// Public token (cuid by default; could be hand-set if memorable
+  /// links are wanted — but cuid is the safer default).
+  token               String   @unique @default(cuid())
+
+  /// Optional FK — many investors aren't yet in the Investor table
+  /// when their first link is sent. Label below is always required.
+  investorId          String?
+  investor            Investor? @relation(fields: [investorId], references: [id])
+
+  /// Human-readable label for the CEO's view: "Mubadala — 2026-06-02".
+  label               String
+  /// Access tier (see enum above).
+  tier                InvestorAccessTier @default(INVESTOR_STANDARD)
+  /// Hard expiry. After this date the token returns 401.
+  expiresAt           DateTime
+  /// Soft revocation — set when the CEO pulls the link manually.
+  revokedAt           DateTime?
+
+  /// NDA click-through (per-token, recorded on first /investor/[token]
+  /// visit). If the investor returns later they don't re-sign.
+  ndaAcknowledgedAt   DateTime?
+  ndaAcknowledgedName String?
+  ndaAcknowledgedIp   String?
+
+  createdById         String?
+  createdBy           User?    @relation("InvestorAccessTokenCreator", fields: [createdById], references: [id])
+  createdAt           DateTime @default(now())
+
+  /// Convenience counters refreshed by the access middleware.
+  lastAccessedAt      DateTime?
+  accessCount         Int      @default(0)
+
+  @@index([token])
+  @@index([investorId])
+  @@index([expiresAt])
+}
+
+/// Investor contact people (multiple per investor org)
+model InvestorContact {
+  id           String   @id @default(cuid())
+  investorId   String
+  investor     Investor @relation(fields: [investorId], references: [id], onDelete: Cascade)
+  name         String
+  title        String?
+  email        String?
+  phone        String?
+  isPrimary    Boolean  @default(false)
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([investorId])
+}
+
+/// Every meaningful touch with an investor — meeting, email, materials sent
+model InvestorTouch {
+  id           String        @id @default(cuid())
+  investorId   String
+  investor     Investor      @relation(fields: [investorId], references: [id], onDelete: Cascade)
+  occurredAt   DateTime      @default(now())
+  summary      String        @db.Text
+  /// Stage AFTER this touch — useful for funnel reporting
+  stageAfter   InvestorStage
+  /// Who logged it
+  byUserId     String?
+  byUser       User?         @relation("InvestorTouchByUser", fields: [byUserId], references: [id])
+  byAgentId    String?
+  byAgent      Agent?        @relation("InvestorTouchByAgent", fields: [byAgentId], references: [id])
+  createdAt    DateTime      @default(now())
+
+  @@index([investorId, occurredAt])
+}
+
+// -------------------------------------------------------------
+// Data Room — curated, finalized documents for investor access.
+//
+// Distinct from `Document` (raw archive). The data room is:
+//   - hierarchical (folders + subfolders)
+//   - status-tracked (every entry has a status — exists, in-progress, etc.)
+//   - placeholder-friendly (entries can exist without documents yet)
+//   - eventually externally-shareable with auth tokens (Phase 2)
+//
+// One DataRoom row per logical room (start with "Series A"; add per-investor
+// rooms later with different access scopes). Folders are nested via parentId.
+// Entries link Documents into folders with overrideable display names and
+// status tracking lifted from Nima's master index.
+// -------------------------------------------------------------
+
+/// Category for entries in the Sources folder (folder 11). Drives the
+/// category chip + filter UI. Optional — only populated for Sources items.
+enum SourceCategory {
+  PRIOR_ART              // patent literature, competing publications cited as prior art
+  PATENT                 // an actual published patent / patent application
+  RESEARCH_PAPER         // peer-reviewed or preprint scientific paper
+  INDUSTRY_REPORT        // analyst report, market study
+  NEWS_ARTICLE           // press article, journalist coverage
+  WEB_SCREENSHOT         // captured page from a competitor / regulator / database
+  COMPETITOR_INTEL       // competitor materials (decks, datasheets, public filings)
+  REGULATORY_REFERENCE   // regulation text, agency guidance, framework doc
+  REFERENCE_DATA         // datasheet, specs, equipment manual
+  OTHER
+}
+
+enum DataRoomEntryStatus {
+  EXISTS              // the document exists and is current
+  VERIFY              // may exist but needs to be located/confirmed
+  CREATE              // needs to be built from scratch
+  IN_PROGRESS         // actively being developed
+  PARTIAL             // partial version exists; needs extraction/expansion
+  PURSUE              // requires external counterparty engagement
+  PENDING_DECISION    // blocked on a strategic decision
+  PHASE_1             // relevant only at Phase 1
+  PHASE_2             // relevant only at Phase 2
+  PHASE_3             // relevant only at Phase 3
+  PHASE_4             // relevant only at Phase 4
+  PHASE_5             // relevant only at Phase 5
+  BDO_DELIVERABLE     // legacy symbol — now means "Senior Financial Advisor deliverable" (Saqib Nawaz). Enum symbol kept stable; UI renders as "advisor deliverable".
+  MAINTAIN            // ongoing register requiring regular updates
+  FORMALIZE           // informal arrangement needing formal documentation
+}
+
+model DataRoom {
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  name         String
+  description  String?
+  /// Private rooms hidden from non-execs entirely.
+  isPrivate    Boolean  @default(false)
+  createdById  String
+  createdBy    User     @relation("DataRoomCreator", fields: [createdById], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  folders      DataRoomFolder[]
+  entries      DataRoomEntry[]
+}
+
+model DataRoomFolder {
+  id           String           @id @default(cuid())
+  dataRoomId   String
+  dataRoom     DataRoom         @relation(fields: [dataRoomId], references: [id], onDelete: Cascade)
+  parentId     String?
+  parent       DataRoomFolder?  @relation("FolderTree", fields: [parentId], references: [id])
+  children     DataRoomFolder[] @relation("FolderTree")
+  slug         String
+  name         String
+  description  String?
+  ordering     Int              @default(0)
+  /// Private to exec users only (e.g. NDA tracker, master reference).
+  isPrivate    Boolean          @default(false)
+
+  entries      DataRoomEntry[]
+
+  @@unique([dataRoomId, parentId, slug])
+  @@index([dataRoomId, ordering])
+}
+
+model DataRoomEntry {
+  id            String              @id @default(cuid())
+  dataRoomId    String
+  dataRoom      DataRoom            @relation(fields: [dataRoomId], references: [id], onDelete: Cascade)
+  folderId      String
+  folder        DataRoomFolder      @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  /// Reference number from the master index, e.g. "1.1", "2.7", "5.10". Lets the
+  /// team and agents refer to entries the same way as the source index.
+  refNumber     String
+
+  /// Display name shown in the data room (may differ from underlying Document title).
+  displayName   String
+
+  /// Status tracking — placeholder vs in-progress vs ready vs maintained etc.
+  status        DataRoomEntryStatus @default(CREATE)
+
+  /// Optional link to the actual Document. Null when entry is a placeholder
+  /// (status = CREATE / PHASE_X / PENDING_DECISION / etc.).
+  documentId    String?
+  document      Document?           @relation("DataRoomEntryDocument", fields: [documentId], references: [id])
+
+  /// Free-text notes / owner / next-step description.
+  notes         String?
+
+  /// Optional version string ("v1", "v2 2026-05-08") for version-control discipline.
+  version       String?
+
+  /// Category for entries in the Sources folder. Null for standard folders 1-10.
+  sourceCategory SourceCategory?
+  /// Origin URL — where this source was retrieved from (paper DOI, news article,
+  /// competitor page, regulator portal). Null for standard folders.
+  sourceUrl      String?
+
+  ordering      Int                 @default(0)
+
+  addedById     String?
+  addedBy       User?               @relation("DataRoomEntryAddedBy", fields: [addedById], references: [id])
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  /// Additional (non-primary) files attached to this entry. The primary doc
+  /// lives in `documentId` (above) for backward compat and as the "headline"
+  /// file for the entry. This list is for everything else — supporting docs,
+  /// signed copies, alternate versions, translations.
+  files         DataRoomEntryFile[]
+
+  // ───────────────────────────────────────────────────────────────
+  // Human-dependency tagging
+  //
+  // When an agent's work surfaces that an entry is blocked on a
+  // specific human (Nima for an investor outreach, Saqib for a
+  // financial sign-off, Marcus for a technical decision, external
+  // counsel for a legal step), the agent calls tag_human_dependency
+  // to attribute the blocker. Layla's morning brief reads these tags
+  // to populate the "What needs you / What needs Saqib / What needs
+  // Marcus" section — data-driven, not inferred.
+  //
+  // When the human acts, they (or a reviewer) marks the dependency
+  // as UNBLOCKED. The agent picks the entry back up on the next
+  // morning run and incorporates the change.
+  // ───────────────────────────────────────────────────────────────
+
+  /// Who needs to act for this entry to move forward. Null = no
+  /// human dependency (agents can advance it autonomously).
+  humanDependencyOwnerId    String?
+  humanDependencyOwner      User?  @relation("EntryHumanDependencyOwner", fields: [humanDependencyOwnerId], references: [id])
+  /// Status of the human dependency.
+  humanDependencyStatus     HumanDependencyStatus @default(NONE)
+  /// Free-text: WHAT the human needs to do, WHY only they can do it.
+  humanDependencyNote       String? @db.Text
+  /// When the dependency was last tagged or status changed.
+  humanDependencyUpdatedAt  DateTime?
+
+  @@unique([dataRoomId, refNumber])
+  @@index([dataRoomId, folderId, ordering])
+  @@index([status])
+  @@index([humanDependencyOwnerId, humanDependencyStatus])
+}
+
+/// Human-dependency status. NONE = no human is blocking; the rest
+/// are progression states once a dependency is tagged.
+enum HumanDependencyStatus {
+  NONE
+  WAITING_ON_HUMAN
+  IN_PROGRESS
+  UNBLOCKED
+  CLOSED
+}
+
+/// Join model — additional files attached to a DataRoomEntry beyond the
+/// "primary" Document linked via DataRoomEntry.documentId. Each row carries
+/// optional ordering + a label (e.g. "Signed copy", "v2 draft").
+model DataRoomEntryFile {
+  id           String         @id @default(cuid())
+  entryId      String
+  entry        DataRoomEntry  @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  documentId   String
+  document     Document       @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  /// Display order within the entry's file list (lower = earlier).
+  ordering     Int            @default(0)
+  /// Optional human label — "Signed copy", "v2 draft", "Arabic translation".
+  label        String?
+  addedById    String?
+  addedBy      User?          @relation("DataRoomEntryFileAddedBy", fields: [addedById], references: [id])
+  createdAt    DateTime       @default(now())
+
+  @@unique([entryId, documentId])
+  @@index([entryId, ordering])
+}
+
+// -------------------------------------------------------------
+// Gmail mailbox sync state — for incremental polling of agent inboxes
+// -------------------------------------------------------------
+
+/// Tracks where the platform's last Gmail poll left off for each agent
+/// mailbox. Used by /api/cron/gmail-poll to fetch only NEW messages each
+/// run rather than re-processing the whole inbox.
+model MailboxSyncState {
+  id              String    @id @default(cuid())
+  /// Agent slug (matches Agent.slug). Indexed unique because each agent
+  /// owns at most one mailbox.
+  agentSlug       String    @unique
+  /// The mailbox email address (also stored on agent-emails.ts but
+  /// duplicated here for easy debugging / direct queries).
+  mailboxEmail    String
+  /// ISO timestamp of the most recent message we've processed. Next poll
+  /// fetches "after:this-timestamp" via Gmail's search query syntax.
+  lastSeenAt      DateTime?
+  /// When the last poll completed (success or empty).
+  lastPolledAt    DateTime?
+  /// Gmail historyId watermark — reserved for future Pub/Sub upgrade.
+  lastHistoryId   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// -------------------------------------------------------------
+// Audit log — every agent decision and admin action
+// -------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  agentId    String?
+  action     String   // "user.login", "task.create", "agent.message", "investor.touch", etc.
+  entityType String?
+  entityId   String?
+  summary    String?
+  metadata   Json?
+  /// Optional entity context (which Safa entity this action affected)
+  entity     SafaEntity?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user       User?    @relation(fields: [userId], references: [id])
+  agent      Agent?   @relation(fields: [agentId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+}
+
+// -------------------------------------------------------------
+// Cron lock — guards against overlapping autonomous-run executions.
+// Single-row TTL pattern; if `acquiredAt` is older than 10 min the
+// lock is considered stale and can be claimed.
+// -------------------------------------------------------------
+
+model CronLock {
+  key        String   @id
+  acquiredAt DateTime @default(now())
+  holder     String   // worker id / hostname
+}
+
+// -------------------------------------------------------------
+// ActivityEvent — user-facing + agent-consumable event stream.
+//
+// Distinct from AuditLog (which is broad / automatic / compliance-grade).
+// ActivityEvent is narrow, semantic, written from specific tool handlers
+// + the agent run executor. Powers:
+//   - human dashboards (Nima, Layla-view, Zara, per-agent drill-downs)
+//   - in-app toast + unread badge
+//   - Phase B: Layla "react mode" agent re-triggers via coalesceKey
+//   - daily email digests
+//
+// Retention: 90 days hard-delete via /api/cron/activity-prune.
+// -------------------------------------------------------------
+
+enum ActivityEventKind {
+  // Shipping
+  DATA_ROOM_ENTRY_SHIPPED      // entry promoted with status EXISTS / IN_PROGRESS / etc.
+  DOCUMENT_UPLOADED            // raw doc added (no data-room link yet)
+
+  // Communication
+  CHANNEL_MESSAGE_POSTED       // agent posted to a channel (human posts only in leadership)
+  AGENT_CONSULT_COMPLETED      // sub-agent finished a consult for a parent
+
+  // Tasks / RAID
+  TASK_COMPLETED
+  TASK_BLOCKED
+  RAID_OPENED
+  RAID_ESCALATED               // severity stepped up to HIGH/CRITICAL
+  RAID_CLOSED
+
+  // Agent runs
+  AGENT_RUN_STARTED
+  AGENT_RUN_COMPLETED
+  AGENT_RUN_FAILED
+
+  // Human-in-the-loop
+  APPROVAL_REQUESTED
+  APPROVAL_DECIDED
+
+  // Investor pipeline
+  INVESTOR_STAGE_CHANGED
+  INVESTOR_TOUCH_LOGGED
+
+  // Layla's opinion-pushback — she disagreed with a shipment / position and
+  // logged her reasoning. Surfaces on the doc, in the agent's queue, and in
+  // the next morning brief.
+  OPINION_PUSHBACK
+
+  // NCPD Partner Network
+  REPORT_SUBMITTED
+  REPORT_VALIDATED
+  REPORT_APPROVED
+  TIER_CHANGE_REQUESTED
+  TIER_CHANGE_APPLIED
+  PARTNER_ONBOARDED
+}
+
+enum ActivityEventSeverity {
+  INFO       // routine ship, doc upload, normal channel post
+  NOTABLE    // milestone, partner-named, first-of-kind, leadership channel
+  WARNING    // missed target, RAID HIGH, task blocked
+  CRITICAL   // RAID CRITICAL, agent run failed, kill-switch hit
+}
+
+model ActivityEvent {
+  id              String                 @id @default(cuid())
+  kind            ActivityEventKind
+  severity        ActivityEventSeverity  @default(INFO)
+
+  /// Exactly one of actorAgent / actorUser is set, usually the agent.
+  actorAgentId    String?
+  actorUserId     String?
+  actorAgent      Agent? @relation("ActivityActorAgent", fields: [actorAgentId], references: [id])
+  actorUser       User?  @relation("ActivityActorUser",  fields: [actorUserId],  references: [id])
+
+  /// Denormalized from the actor agent at write time so branch-filtered
+  /// dashboard queries don't need a join. If an agent ever changes branch
+  /// later, old events keep their original branch — correct behavior.
+  branch          AgentBranch?
+
+  /// Loose FK — entityType names a model ("DataRoomEntry", "RaidEntry",
+  /// "AgentRun", "Task", "ChannelMessage", "ApprovalRequest", ...).
+  entityType      String?
+  entityId        String?
+
+  /// Feed-ready, single-line. e.g. "Omar shipped: Phase 1 Org Chart".
+  title           String
+  /// Optional longer body for hover/expand.
+  summary         String?                @db.Text
+
+  /// Structured payload for rich card rendering — shape varies by kind.
+  payload         Json                   @default("{}")
+
+  /// Events sharing a coalesceKey get batched into one Layla "react mode"
+  /// trigger by the reactor cron (Phase B). For autonomous-run ships:
+  /// `agent-run:<runId>` — all events in the same run batch together.
+  coalesceKey     String?
+
+  /// Phase B: agent reactor consumption tracking.
+  reactedAt        DateTime?
+  reactedByAgentId String?
+
+  createdAt       DateTime               @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([branch, createdAt(sort: Desc)])
+  @@index([actorAgentId, createdAt(sort: Desc)])
+  @@index([severity, createdAt(sort: Desc)])
+  @@index([kind, createdAt(sort: Desc)])
+  @@index([reactedAt])
+  @@index([coalesceKey])
+}
+
+// -------------------------------------------------------------
+// UserNotificationPreference — per-user dashboard + ping prefs.
+// Kept separate from User so it can change frequently without
+// triggering updates on the hot User row.
+// -------------------------------------------------------------
+
+model UserNotificationPreference {
+  userId            String              @id
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Empty array = all branches. Non-empty = allowlist.
+  watchedBranches   AgentBranch[]       @default([])
+  /// Agent slugs to mute regardless of branch.
+  mutedAgentSlugs   String[]            @default([])
+  /// Event kinds to mute entirely.
+  mutedKinds        ActivityEventKind[] @default([])
+  /// Floor — events below this severity don't toast (still appear in feed).
+  toastMinSeverity  ActivityEventSeverity @default(INFO)
+
+  /// Phase 1.5: daily email digest of yesterday's activity.
+  emailDigestEnabled Boolean             @default(false)
+  emailDigestHourGst Int                 @default(8)   // 0-23
+
+  /// Last time user opened the activity feed — drives unread badge count.
+  lastSeenAt        DateTime?
+
+  updatedAt         DateTime            @updatedAt
+}
+
+// =============================================================
+// NCPD Partner Network — domain models (v0)
+// =============================================================
+
+enum Region {
+  ABU_DHABI
+  DUBAI
+  SHARJAH
+  AJMAN
+  UMM_AL_QUWAIN
+  RAS_AL_KHAIMAH
+  FUJAIRAH
+}
+
+enum PartnerType {
+  FARM
+  FACTORY
+  COMPANY
+  RECYCLER
+  COLLECTOR
+}
+
+enum PartnerSizeClass {
+  SMALL
+  MEDIUM
+  LARGE
+}
+
+enum PartnerTier {
+  REGISTERED
+  ACTIVE
+  CERTIFIED
+  ELITE
+}
+
+enum PartnerStanding {
+  GOOD        // reporting current
+  AT_RISK     // one missed quarter
+  PAUSED      // two+ missed quarters — benefits paused, path back open
+}
+
+enum ReportPeriodStatus {
+  DRAFT       // Abdullah is still collecting / clarifying
+  SUBMITTED   // partner confirmed; awaiting validation
+  VALIDATED   // VAL-01 passed it; awaiting NCPD approval if flagged
+  APPROVED    // counted for tier standing
+  RETURNED    // sent back to partner with questions
+}
+
+enum WasteStream {
+  DATES
+  PITS
+  FRONDS
+  FROND_BASE
+  FIBER
+  OTHER
+}
+
+enum WasteFate {
+  FEED
+  SOLD
+  RECYCLED
+  BURNED
+  BURIED
+  DUMPED
+  UNKNOWN
+}
+
+model Partner {
+  id             String            @id @default(cuid())
+  /// Public registry number, e.g. "NCPD-QSM-00042"
+  registryNo     String            @unique
+  nameEn         String
+  nameAr         String?
+  type           PartnerType
+  sizeClass      PartnerSizeClass?
+  factorySubtype String?           // PACKING | TRANSFORMATIVE (factories only)
+  region         Region
+  city           String?
+  tier           PartnerTier       @default(REGISTERED)
+  standing       PartnerStanding   @default(GOOD)
+  foundingMember Boolean           @default(false)
+
+  contactName    String?
+  contactPhone   String?           // WhatsApp number, E.164
+  contactEmail   String?
+  preferredLang  String            @default("ar") // "ar" | "en"
+
+  /// Structured profile facts Abdullah has learned (palm count, varieties,
+  /// capacity…) — the "never ask twice" memory.
+  profileFacts   Json?
+
+  /// Optional login for the partner portal.
+  userId         String?           @unique
+  user           User?             @relation(fields: [userId], references: [id])
+
+  inviteCode     String?           @unique
+
+  reports        QuarterlyReport[]
+  tierEvents     TierEvent[]
+  transfersOut   MaterialTransfer[] @relation("TransferFrom")
+  transfersIn    MaterialTransfer[] @relation("TransferTo")
+  applications   Application[]
+  ticketsCreated CollectionTicket[] @relation("TicketCreator")
+  ticketsClaimed CollectionTicket[] @relation("TicketClaimer")
+  listings       Listing[]
+  listingInterests ListingInterest[]
+  suggestions    Suggestion[]
+  rsvps          AnnouncementRsvp[]
+
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([region, type])
+  @@index([tier, standing])
+}
+
+model QuarterlyReport {
+  id              String             @id @default(cuid())
+  partnerId       String
+  partner         Partner            @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  year            Int
+  quarter         Int                // 1-4
+  status          ReportPeriodStatus @default(DRAFT)
+
+  /// 0-100 — VAL-01 confidence in the data. Null until validated.
+  confidenceScore Int?
+  /// VAL-01 notes: anomalies vs priors/history, in Markdown.
+  validationNotes String?
+
+  /// Document.ids of source files (Excel, ledger photos, voice notes).
+  sourceDocIds    String[]           @default([])
+
+  production      ProductionRecord?
+  wasteRecords    WasteRecord[]
+
+  submittedAt     DateTime?
+  validatedAt     DateTime?
+  approvedAt      DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@unique([partnerId, year, quarter])
+  @@index([year, quarter, status])
+}
+
+model ProductionRecord {
+  id                String          @id @default(cuid())
+  reportId          String          @unique
+  report            QuarterlyReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  palmTreeCount     Int?
+  datesProducedTons Float?          // farms: harvested; factories: received
+  datesSoldTons     Float?
+  varieties         String[]        @default([])
+  processingCapacityTons Float?     // factories/recyclers
+  notes             String?
+}
+
+model WasteRecord {
+  id        String          @id @default(cuid())
+  reportId  String
+  report    QuarterlyReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  stream    WasteStream
+  fate      WasteFate       @default(UNKNOWN)
+  tons      Float
+  /// Registry number of the receiving partner, when the material moved
+  /// to another network member (feeds MaterialTransfer reconciliation).
+  destinationRegistryNo String?
+  notes     String?
+
+  @@index([reportId])
+  @@index([stream, fate])
+}
+
+model MaterialTransfer {
+  id            String      @id @default(cuid())
+  fromPartnerId String
+  fromPartner   Partner     @relation("TransferFrom", fields: [fromPartnerId], references: [id])
+  toPartnerId   String
+  toPartner     Partner     @relation("TransferTo", fields: [toPartnerId], references: [id])
+  stream        WasteStream
+  tons          Float
+  year          Int
+  quarter       Int
+  /// True once both sides' reports agree within tolerance.
+  reconciled    Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+
+  @@index([fromPartnerId, year, quarter])
+  @@index([toPartnerId, year, quarter])
+}
+
+model TierEvent {
+  id         String       @id @default(cuid())
+  partnerId  String
+  partner    Partner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  fromTier   PartnerTier?
+  toTier     PartnerTier
+  fromStanding PartnerStanding?
+  toStanding PartnerStanding
+  reason     String
+  /// ApprovalRequest.id that authorized this change (null for automatic
+  /// standing decay, which is still logged).
+  approvalId String?
+  createdAt  DateTime     @default(now())
+
+  @@index([partnerId, createdAt(sort: Desc)])
+}
+
+/// Static regional baseline from the NCPD May 2026 deck (Restricted).
+/// Seeded once; dashboards read measured data first and fall back to this.
+model RegionBaseline {
+  region              Region  @id
+  nameAr              String
+  palmTrees           Int
+  dateProductionTons  Int
+  farmDateWasteTons   Int
+  palmByproductsTons  Int
+  frondsTons          Int
+  frondBaseTons       Int
+  fiberTons           Int
+  otherByproductTons  Int
+  dateFactories       Int?
+  factoryReceiptTons  Int?
+  factoryDateWasteTons Int?
+  recyclingPlants     Int?
+}
+
+// =============================================================
+// NCPD Partner Portal — network services (v1)
+// =============================================================
+
+enum ApplicationKind {
+  AWARD
+  HONOR
+  GRANT
+  MENTION
+}
+
+enum ApplicationStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  DECLINED
+}
+
+model Application {
+  id           String            @id @default(cuid())
+  partnerId    String
+  partner      Partner           @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  kind         ApplicationKind
+  title        String
+  body         String            @db.Text
+  attachmentDocIds String[]      @default([])
+  status       ApplicationStatus @default(SUBMITTED)
+  decisionNote String?
+  decidedById  String?
+  decidedAt    DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([partnerId, status])
+  @@index([status, createdAt(sort: Desc)])
+}
+
+enum TicketStatus {
+  OPEN
+  CLAIMED
+  COLLECTED
+  CANCELLED
+}
+
+model CollectionTicket {
+  id                String       @id @default(cuid())
+  partnerId         String
+  partner           Partner      @relation("TicketCreator", fields: [partnerId], references: [id], onDelete: Cascade)
+  stream            WasteStream
+  estimatedTons     Float
+  region            Region
+  city              String?
+  locationNote      String?
+  readyFrom         DateTime?
+  notes             String?
+  status            TicketStatus @default(OPEN)
+  claimedByPartnerId String?
+  claimedBy         Partner?     @relation("TicketClaimer", fields: [claimedByPartnerId], references: [id])
+  claimedAt         DateTime?
+  collectedAt       DateTime?
+  actualTons        Float?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@index([status, region])
+  @@index([partnerId])
+  @@index([claimedByPartnerId])
+}
+
+enum ListingCategory {
+  DATES
+  PITS
+  FRONDS
+  FROND_BASE
+  FIBER
+  COMPOST
+  PRODUCTS
+  OTHER
+}
+
+enum ListingStatus {
+  ACTIVE
+  CLOSED
+}
+
+model Listing {
+  id         String          @id @default(cuid())
+  partnerId  String
+  partner    Partner         @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  category   ListingCategory
+  title      String
+  qtyTons    Float?
+  askPriceAed Float?
+  notes      String?
+  region     Region
+  status     ListingStatus   @default(ACTIVE)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  interests  ListingInterest[]
+
+  @@index([status, category, region])
+  @@index([partnerId])
+}
+
+model ListingInterest {
+  id         String   @id @default(cuid())
+  listingId  String
+  listing    Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  partnerId  String
+  partner    Partner  @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  message    String?
+  createdAt  DateTime @default(now())
+
+  @@unique([listingId, partnerId])
+}
+
+enum SuggestionKind {
+  REQUEST
+  FEEDBACK
+  IDEA
+  COMPLAINT
+}
+
+enum SuggestionStatus {
+  NEW
+  REVIEWED
+  PLANNED
+  DONE
+  DECLINED
+}
+
+model Suggestion {
+  id        String           @id @default(cuid())
+  partnerId String
+  partner   Partner          @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  kind      SuggestionKind
+  body      String           @db.Text
+  status    SuggestionStatus @default(NEW)
+  staffNote String?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([partnerId])
+}
+
+enum AnnouncementKind {
+  DIRECTIVE
+  ADVISORY
+  EVENT
+  SEASON
+}
+
+model Announcement {
+  id          String           @id @default(cuid())
+  kind        AnnouncementKind
+  titleEn     String
+  titleAr     String
+  bodyEn      String           @db.Text
+  bodyAr      String           @db.Text
+  eventDate   DateTime?
+  rsvpEnabled Boolean          @default(false)
+  publishedAt DateTime         @default(now())
+
+  rsvps       AnnouncementRsvp[]
+
+  @@index([publishedAt(sort: Desc)])
+}
+
+model AnnouncementRsvp {
+  id             String       @id @default(cuid())
+  announcementId String
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  partnerId      String
+  partner        Partner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  attending      Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+
+  @@unique([announcementId, partnerId])
+}

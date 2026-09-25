@@ -1,0 +1,39 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Build output
+/.next/
+/out/
+/build
+next-env.d.ts
+
+# Misc
+.DS_Store
+*.pem
+.idea
+.vscode
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files — NEVER commit
+.env
+.env.local
+.env.development
+.env.production
+
+# Prisma
+/prisma/.cache/
+
+# Uploads (persistent volume in Coolify)
+/uploads/
+
+# TypeScript build cache
+*.tsbuildinfo
+
+# Test / coverage
+/coverage

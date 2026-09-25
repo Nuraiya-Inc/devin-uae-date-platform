@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.env
+.env.local
+.env.production
+*.log
+README.md
+GO_LIVE.md
+ARCHITECTURE.md
+.vscode
+.idea
+uploads
+coverage

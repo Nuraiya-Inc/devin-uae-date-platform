@@ -1,0 +1,74 @@
+# =====================================================================
+# UAE Palm Network — single combined stack (app + Postgres).
+#
+# Deploy this in Coolify as a **Docker Compose** resource (one resource,
+# not a separate app + database). Both services join the SAME compose
+# network automatically, so the app reaches the database at host `db`
+# on port 5432 — this removes the internal-networking problem that a
+# separate standalone database hits.
+#
+# In Coolify: + New → Docker Compose → pick this repo → set the
+# environment variables below in the UI → set the domain on the `app`
+# service → Deploy. Schema is applied automatically at first boot
+# (prisma db push in prisma/boot.sh). Then run the seeds once from the
+# app service Terminal:  npm run db:seed  &&  npm run db:seed-demo
+# =====================================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: upn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_upn_password}
+      POSTGRES_DB: upn
+    volumes:
+      - upn_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U upn -d upn']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # App reaches the database over the shared compose network at host `db`.
+      DATABASE_URL: postgresql://upn:${POSTGRES_PASSWORD:-changeme_upn_password}@db:5432/upn?schema=public
+      # Auth.js v5 reads AUTH_SECRET; NEXTAUTH_SECRET set too for compatibility.
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+      NEXTAUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+      AUTH_URL: ${AUTH_URL:-https://uae.safabioworks.com}
+      NEXTAUTH_URL: ${AUTH_URL:-https://uae.safabioworks.com}
+      AUTH_TRUST_HOST: 'true'
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET}
+      APP_NAME: 'UAE Palm Network'
+      SEED_CEO_EMAIL: ${SEED_CEO_EMAIL:-nima.vakili@kmigroup.com}
+      SEED_CEO_NAME: ${SEED_CEO_NAME:-Nima Vakili}
+      SEED_CEO_PASSWORD: ${SEED_CEO_PASSWORD:?set SEED_CEO_PASSWORD}
+      NODE_ENV: production
+    # Coolify routes the configured domain to this exposed port.
+    expose:
+      - '3000'
+    ports:
+      - '3000'
+    volumes:
+      - upn_uploads:/app/uploads
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3000/api/health || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  upn_pgdata:
+  upn_uploads:

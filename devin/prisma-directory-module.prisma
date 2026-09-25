@@ -1,0 +1,107 @@
+// =============================================================
+// SAFA BIOWORKS VALUE-CHAIN NETWORK DIRECTORY — Prisma module
+// Add these models + enums to prisma/schema.prisma.
+//
+// WHY A SEPARATE MODEL (not Partner):
+//   Partner = a registered, consented, REPORTING member with a registry
+//   number, tier ladder, and quarterly reports. It feeds participation
+//   rates, benchmarks, the sector report and ESG math.
+//   DirectoryEntry = Safa BioWorks' established value-chain network map:
+//   known organizations across the ecosystem. NOT counted in any partner
+//   aggregate until an entry is PROMOTED into a Partner (relationship
+//   status REGISTERED). This keeps sector numbers honest (rule UPN-7).
+//
+// PROMOTION PATH:
+//   A DirectoryEntry moves DIRECTORY -> CONTACTED -> ENGAGED -> ONBOARDING
+//   -> REGISTERED. On REGISTERED, staff create a Partner row and link it
+//   via DirectoryEntry.partnerId. Aggregates read Partner only.
+// =============================================================
+
+/// Six stages of the UAE date-palm value chain.
+enum ValueChainStage {
+  GROWERS_FARMS              // 1. Growers & Farms
+  PROCESSORS_MANUFACTURERS   // 2. Processors & Manufacturers
+  WASTE_COLLECTION           // 3. Waste Collection & By-products
+  TRADERS_IMPORT_EXPORT      // 4. Traders, Importers & Exporters
+  BUYERS_END_USERS           // 5. Buyers & End-users
+  ECOSYSTEM                  // 6. Ecosystem (Govt, Research, Events, Funders)
+}
+
+/// Outreach priority from the desk research. DISTINCT from PartnerTier —
+/// this is how important the entry is to engage, not a membership level.
+enum DirectoryPriority {
+  PRIORITY_1   // feedstock at scale / bolt-on / gatekeeper / funder
+  PRIORITY_2   // other High/Medium-confidence entries
+  PRIORITY_3   // single weak mention — verify before outreach
+}
+
+/// Confidence in the researched data for this entry.
+enum ConfidenceLevel {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+/// Where this entry sits in the relationship funnel with the network.
+enum RelationshipStatus {
+  DIRECTORY    // mapped only; no contact yet
+  CONTACTED    // outreach started
+  ENGAGED      // two-way conversation
+  ONBOARDING   // joining the network
+  REGISTERED   // promoted to a Partner (see partnerId)
+  DECLINED     // not proceeding
+}
+
+model DirectoryEntry {
+  id            String            @id @default(cuid())
+
+  nameEn        String
+  nameAr        String?
+  stage         ValueChainStage
+  segment       String            // e.g. "Farm / Grower", "Trader / Wholesaler"
+  alsoRoles     String?           // secondary roles, e.g. "Government / Regulator"
+  priority      DirectoryPriority
+  confidence    ConfidenceLevel
+
+  /// Single-emirate entries map to the Region enum; federal / multi-emirate /
+  /// unconfirmed entries leave this null and keep the raw label below.
+  region        Region?
+  emirateLabel  String            // raw value as researched (never lost)
+  location      String?
+
+  description   String?           @db.Text
+  ownership     String?
+
+  // Contact block — Safa's established network. Staff-visible; NOT shown on
+  // public/neutral surfaces (impact map / showcase).
+  website       String?
+  phone         String?
+  email         String?
+  address       String?
+
+  /// Internal Safa BioWorks context (feedstock relevance). INTERNAL ONLY —
+  /// keep off neutral/public platform surfaces to honor rule UPN-1.
+  safaRelevance String?           @db.Text
+
+  sources       String[]          @default([])
+
+  relationship  RelationshipStatus @default(DIRECTORY)
+
+  /// Set when this entry is promoted into a registered network member.
+  partnerId     String?            @unique
+  partner       Partner?           @relation(fields: [partnerId], references: [id])
+
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([stage, priority])
+  @@index([region, stage])
+  @@index([relationship])
+  @@index([confidence])
+}
+
+// -------------------------------------------------------------
+// ADD to the existing `model Partner { ... }` block:
+//   directoryEntry DirectoryEntry?
+// (back-relation for the optional promotion link above)
+// -------------------------------------------------------------
