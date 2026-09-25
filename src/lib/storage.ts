@@ -19,7 +19,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 
-const UPLOADS_ROOT = '/app/uploads';
+const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_ROOT || '/app/uploads');
 const DOCUMENTS_DIR = path.join(UPLOADS_ROOT, 'documents');
 // 50 MB per file. Phone photos at full resolution are routinely 5-8 MB; this
 // gives plenty of headroom for hi-res scans, photographed multi-page documents,
