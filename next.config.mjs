@@ -21,6 +21,14 @@ const nextConfig = {
       // × 50 MB) and lib/storage.ts single-file cap. Sharp downscales images
       // before sending to Anthropic, so this is the upload boundary only.
       bodySizeLimit: '80mb',
+      // Browser-preview / reverse proxies rewrite Host but keep the browser's
+      // Origin, which trips the server-action CSRF origin check. Dev-only
+      // allowances; extra origins can be added via ALLOWED_ACTION_ORIGINS
+      // (comma-separated host[:port] entries).
+      allowedOrigins: [
+        '127.0.0.1:64358',
+        ...(process.env.ALLOWED_ACTION_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean) ?? []),
+      ],
     },
     // NOTE: dropped `middlewareClientMaxBodySize` experimental option — it
     // increases build memory pressure on small VPSes and caused OOM kills.
