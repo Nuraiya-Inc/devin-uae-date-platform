@@ -47,6 +47,12 @@ const nextConfig = {
         source: '/investor-data-room',
         destination: '/investor-data-room/index.html',
       },
+      // Browsers request /favicon.ico unprompted; the app icon lives at
+      // src/app/icon.png (served as /icon.png).
+      {
+        source: '/favicon.ico',
+        destination: '/icon.png',
+      },
     ];
   },
   async headers() {
