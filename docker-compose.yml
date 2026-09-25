@@ -49,6 +49,7 @@ services:
       AUTH_TRUST_HOST: 'true'
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET}
       APP_NAME: 'UAE Palm Network'
       SEED_CEO_EMAIL: ${SEED_CEO_EMAIL:-nima.vakili@kmigroup.com}
