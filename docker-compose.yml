@@ -44,8 +44,8 @@ services:
       # Auth.js v5 reads AUTH_SECRET; NEXTAUTH_SECRET set too for compatibility.
       AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
       NEXTAUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
-      AUTH_URL: ${AUTH_URL:-https://uae.safabioworks.com}
-      NEXTAUTH_URL: ${AUTH_URL:-https://uae.safabioworks.com}
+      AUTH_URL: ${AUTH_URL:-https://devin.nuraiya.ai}
+      NEXTAUTH_URL: ${AUTH_URL:-https://devin.nuraiya.ai}
       AUTH_TRUST_HOST: 'true'
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}

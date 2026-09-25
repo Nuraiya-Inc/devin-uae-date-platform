@@ -17,7 +17,7 @@ import { sendMessage, type EmailAttachment } from './gmail';
 import { getAgentEmail } from './agent-emails';
 
 const PUBLIC_BASE_URL =
-  process.env.NEXT_PUBLIC_BASE_URL ?? 'https://uae.safabioworks.com';
+  process.env.NEXT_PUBLIC_BASE_URL ?? 'https://devin.nuraiya.ai';
 
 /**
  * Compose + send review notification emails. Fans out one email per

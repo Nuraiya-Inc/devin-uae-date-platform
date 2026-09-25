@@ -1,8 +1,12 @@
-# Deploy — uae.safabioworks.com
+# Deploy — devin.nuraiya.ai
 
-Target: the existing Hostinger VPS (Coolify v4, Traefik). This app deploys as a
-**separate Coolify app with its own Postgres** — zero contact with any other
-app or database on the box.
+Target: Coolify v4 (Traefik). This app deploys as a **separate Coolify app with
+its own Postgres** — zero contact with any other app or database on the box.
+
+## 0. DNS (do first)
+
+`devin.nuraiya.ai` → A record → the Coolify VPS public IP (grey cloud if
+behind Cloudflare — Traefik terminates TLS itself).
 
 ## 1. Coolify — Postgres
 
@@ -12,7 +16,7 @@ Coolify → your project → **+ New → Database → PostgreSQL**
 
 ## 2. Coolify — the app
 
-**+ New → Application → Private repository** → `safabioworks/uae-date-platform`,
+**+ New → Application → Private repository** → `Nuraiya-Inc/devin-uae-date-platform`,
 branch `main`, Build Pack: **Dockerfile**.
 
 - **Resources:** set memory limit 4–6 GB (Next.js build needs it).
@@ -28,19 +32,21 @@ branch `main`, Build Pack: **Dockerfile**.
 | `SEED_CEO_NAME` | Nima Vakili |
 | `SEED_CEO_PASSWORD` | fresh — never reuse another platform's |
 
-- **Domain:** `https://uae.safabioworks.com`
-  (Cloudflare: A record `uae` → the VPS IP, grey cloud.)
+- **Domain:** `https://devin.nuraiya.ai`
   The image's CMD exports NEXTAUTH_URL/AUTH_URL for this domain — if you
-  choose a different domain, edit the CMD line in the Dockerfile too.
+  change the domain, edit the CMD line in the Dockerfile too (and set
+  `CANONICAL_URL` to override `src/lib/auth.ts`'s production default).
 - Optional: enable the GitHub webhook so every push to `main` auto-deploys.
 
 ## 3. First boot
 
-Deploy. Schema applies automatically at boot. Then open the app's **Terminal**:
+Deploy. Schema applies automatically at boot (`prisma db push` in
+`prisma/boot.sh`). Then open the app's **Terminal**:
 
 ```bash
-npm run db:seed        # admin + demo official/partner users, agents, baseline
-npm run db:seed-demo   # 10 demo partners, 4 quarters of history
+npm run db:seed                      # admin + demo official/partner, agents, baseline
+npm run db:seed-demo                 # demo partners + 4 quarters of history
+npx tsx scripts/seed-directory.ts    # 232-entry value-chain directory
 ```
 
 Logins: admin = SEED_CEO_EMAIL/PASSWORD · official demo.official@uaepalm.ae
@@ -56,6 +62,13 @@ curl -s -X POST -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/ap
 
 ## 5. Verify
 
-Phone: `/portal` in Arabic RTL with the عربي|EN toggle; membership card;
-certificate downloads with the annual seal. Laptop: console dashboard,
-Standings, Next Phase. `npm run demo:reset` between demo rehearsals.
+`https://devin.nuraiya.ai/api/health` → `{"status":"ok"}`. Sign in, check
+`/directory` (232 entries, staff-only), `/partners`, `/dashboard`. Phone:
+`/portal` in Arabic RTL with the عربي|EN toggle; membership card; certificate
+downloads. `npm run demo:reset` between demo rehearsals.
+
+---
+
+**Alternative:** `docker-compose.yml` deploys app + Postgres as a single
+compose resource instead of two separate ones — same env vars, `db` service
+handles Postgres. Use whichever the Coolify project convention prefers.

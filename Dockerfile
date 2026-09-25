@@ -69,8 +69,8 @@ ENV HOSTNAME="0.0.0.0"
 # Hardcode auth URL — Coolify env var management has been inconsistent.
 # These values get burned into the runtime image and override anything
 # Coolify tries (or fails) to pass at deploy time.
-ENV NEXTAUTH_URL=https://uae.safabioworks.com
-ENV AUTH_URL=https://uae.safabioworks.com
+ENV NEXTAUTH_URL=https://devin.nuraiya.ai
+ENV AUTH_URL=https://devin.nuraiya.ai
 ENV AUTH_TRUST_HOST=true
 
 # Standalone output bundles only what's needed at runtime
@@ -118,7 +118,7 @@ ENTRYPOINT ["/sbin/tini", "--"]
 # whatever Coolify passes via docker -e, because exports inside the shell
 # replace the parent env for all child processes. Hard-codes the canonical
 # URL so login redirects always go to the real domain.
-CMD ["sh", "-c", "export NEXTAUTH_URL=https://uae.safabioworks.com; export AUTH_URL=https://uae.safabioworks.com; export AUTH_TRUST_HOST=true; exec ./prisma/boot.sh"]
+CMD ["sh", "-c", "export NEXTAUTH_URL=https://devin.nuraiya.ai; export AUTH_URL=https://devin.nuraiya.ai; export AUTH_TRUST_HOST=true; exec ./prisma/boot.sh"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1

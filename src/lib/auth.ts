@@ -15,7 +15,7 @@ import type { UserRole, SafaEntity } from '@prisma/client';
  */
 const CANONICAL_URL =
   process.env.NODE_ENV === 'production'
-    ? 'https://uae.safabioworks.com'
+    ? (process.env.CANONICAL_URL ?? 'https://devin.nuraiya.ai')
     : (process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? 'http://localhost:3000');
 process.env.NEXTAUTH_URL = CANONICAL_URL;
 process.env.AUTH_URL = CANONICAL_URL;
