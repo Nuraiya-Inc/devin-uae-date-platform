@@ -48,6 +48,7 @@ import {
 } from 'lucide-react';
 import Logo from '@/components/brand/Logo';
 import NotificationBell from '@/components/feed/NotificationBell';
+import SignOutButton from '@/components/SignOutButton';
 
 interface SidebarProps {
   user: {
@@ -283,10 +284,11 @@ export default function Sidebar({
         )}
       </button>
 
+      <div className={`pt-4 mt-1 border-t border-white/10 flex items-center ${collapsed ? 'justify-center' : 'gap-1'}`}>
       <Link
         href="/account"
         title="Account settings"
-        className={`pt-4 mt-1 border-t border-white/10 flex items-center ${collapsed ? 'justify-center' : 'gap-2.5'} rounded-b-lg hover:bg-white/5 -mx-2 px-2 pb-2 transition-colors`}
+        className={`flex flex-1 items-center ${collapsed ? 'justify-center' : 'gap-2.5'} rounded-lg hover:bg-white/5 px-2 py-2 -mx-2 min-w-0 transition-colors`}
       >
         {user.photoUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -316,6 +318,8 @@ export default function Sidebar({
           </div>
         )}
       </Link>
+      {!collapsed && <SignOutButton variant="icon" />}
+      </div>
     </aside>
   );
 }

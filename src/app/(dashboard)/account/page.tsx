@@ -10,6 +10,7 @@ import { redirect } from 'next/navigation';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import ChangePasswordForm from './ChangePasswordForm';
+import SignOutButton from '@/components/SignOutButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,6 +86,13 @@ export default async function AccountPage() {
           sites — a password manager helps.
         </p>
         <ChangePasswordForm />
+      </section>
+
+      <section className="bg-white border border-line rounded-xl p-5 mt-6 shadow-card">
+        <h2 className="text-[10px] uppercase tracking-[0.15em] text-muted font-semibold mb-3">
+          Session
+        </h2>
+        <SignOutButton variant="block" />
       </section>
     </div>
   );

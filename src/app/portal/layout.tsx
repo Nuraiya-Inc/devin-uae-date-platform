@@ -27,6 +27,7 @@ import {
 import PortalNavLink from './PortalNavLink';
 import WelcomeTour from './WelcomeTour';
 import LangToggle from './LangToggle';
+import SignOutButton from '@/components/SignOutButton';
 import { getPortalLang } from '@/lib/portal-lang';
 
 export const dynamic = 'force-dynamic';
@@ -64,6 +65,7 @@ export default async function PortalLayout({ children }: { children: React.React
           </Link>
           <div className="flex items-center gap-3">
             <LangToggle lang={lang} />
+            <SignOutButton variant="text" label={lang === 'ar' ? 'تسجيل الخروج' : 'Sign out'} />
             <div className="hidden sm:block" style={{ textAlign: lang === 'ar' ? 'left' : 'right' }}>
               <div className="text-sm font-medium text-ink">
                 {lang === 'ar' ? (partner.nameAr ?? partner.nameEn) : partner.nameEn}

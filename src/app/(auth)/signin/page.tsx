@@ -179,6 +179,18 @@ export default async function SignInPage({
             </button>
           </form>
 
+          {/* UAE PASS — visual placeholder (integration pending) */}
+          <button
+            type="button"
+            disabled
+            title="UAE PASS sign-in — coming soon"
+            className="mt-3 flex w-full items-center justify-center gap-2.5 rounded-md border border-line bg-white py-2.5 text-sm font-semibold text-ink/90 transition-colors hover:border-brand-300 disabled:cursor-not-allowed"
+          >
+            <FingerprintIcon />
+            <span>Login with <span className="font-bold">UAE PASS</span></span>
+            <span className="rounded bg-gold-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-gold-700">Soon</span>
+          </button>
+
           <p className="mt-10 text-xs text-muted text-center">
             Access by invitation only.{' '}
             <span className="text-brand/70">Contact your administrator if you need credentials.</span>
@@ -189,5 +201,19 @@ export default async function SignInPage({
         </div>
       </div>
     </main>
+  );
+}
+
+/** UAE PASS-style fingerprint mark (teal/red arcs, like the official logo). */
+function FingerprintIcon() {
+  return (
+    <svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden>
+      <path d="M10 4.8a12 12 0 0 1 12 0" stroke="#0B6E4F" strokeWidth="2.6" strokeLinecap="round" />
+      <path d="M6.5 9.5a12 12 0 0 0-2 6.5c0 2 .4 4 1.2 5.8" stroke="#0B6E4F" strokeWidth="2.6" strokeLinecap="round" />
+      <path d="M25.5 9.5a12 12 0 0 1 2 6.5c0 1.6-.26 3.2-.75 4.6" stroke="#0B6E4F" strokeWidth="2.6" strokeLinecap="round" />
+      <path d="M11 10.8a6.5 6.5 0 0 1 10 0" stroke="#0B6E4F" strokeWidth="2.6" strokeLinecap="round" />
+      <path d="M11 15.5v2.8c0 2.7 1.4 5.4 3.6 6.9" stroke="#0B6E4F" strokeWidth="2.6" strokeLinecap="round" />
+      <path d="M21 15.5v1.9c0 3.6-2 6.9-5.1 8.6" stroke="#C8102E" strokeWidth="2.6" strokeLinecap="round" />
+    </svg>
   );
 }
