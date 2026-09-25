@@ -176,7 +176,7 @@ async function scorePlainModel(): Promise<ArmResult[]> {
 
   for (const c of CORPUS) {
     const resp = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
       max_tokens: 300,
       temperature: 0,
       system:

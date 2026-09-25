@@ -4,7 +4,8 @@
 #
 # Order of operations:
 #   1. Wait for the database to accept connections (up to 60s).
-#   2. If prisma/migrations/ exists with content → `migrate deploy`.
+#   2. If prisma/migrations/ exists with content → `migrate deploy`
+#      (an existing db-push database is baselined once, automatically).
 #   3. Otherwise → `db push` (first-deploy bootstrap).
 #   4. Start the Next.js standalone server.
 #
@@ -36,7 +37,27 @@ fi
 # else `db push` (first-ever deploy bootstrap).
 if [ -d "prisma/migrations" ] && [ -n "$(ls -A prisma/migrations 2>/dev/null)" ]; then
   echo "[boot] Running prisma migrate deploy..."
-  npx prisma migrate deploy
+  if ! out=$(npx prisma migrate deploy 2>&1); then
+    echo "$out"
+    # P3005 = database was created by `db push` (pre-migrations era) and has
+    # no migration history. Baseline it once: sync additively (no
+    # --accept-data-loss, so anything destructive aborts the boot), then mark
+    # every existing migration as applied. Later deploys take the normal path.
+    if echo "$out" | grep -q "P3005"; then
+      echo "[boot] Existing database without migration history — baselining..."
+      npx prisma db push --skip-generate
+      for m in prisma/migrations/*/; do
+        name=$(basename "$m")
+        echo "[boot] Marking migration $name as applied"
+        npx prisma migrate resolve --applied "$name"
+      done
+      npx prisma migrate deploy
+    else
+      exit 1
+    fi
+  else
+    echo "$out"
+  fi
 else
   echo "[boot] No migrations directory found — running prisma db push (first deploy)..."
   npx prisma db push --accept-data-loss --skip-generate
