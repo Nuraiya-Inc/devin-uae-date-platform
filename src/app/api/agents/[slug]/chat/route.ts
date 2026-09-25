@@ -44,6 +44,7 @@ import {
   executeListPartners,
   executeListPartnerReports,
   executeStartOrGetReport,
+  executeResolveQuantity,
   executeRecordProduction,
   executeRecordWaste,
   executeSubmitReport,
@@ -555,6 +556,10 @@ export async function POST(
     user,
     threadId: thread.id,
     consultationDepth: 0,
+    // Provenance for resolve_quantity → QuantityResolution rows:
+    // figure → the farmer's message → the media it arrived in.
+    currentMessageId: userMessage.id,
+    currentAttachmentDocIds: attachedDocIds,
   };
 
   // ────────────────────────────────────────────────────────────────
@@ -690,6 +695,9 @@ export async function POST(
         } else if (tu.name === 'start_or_get_report') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           result = await executeStartOrGetReport(tu.input as any, ctx);
+        } else if (tu.name === 'resolve_quantity') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          result = await executeResolveQuantity(tu.input as any, ctx);
         } else if (tu.name === 'record_production') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           result = await executeRecordProduction(tu.input as any, ctx);

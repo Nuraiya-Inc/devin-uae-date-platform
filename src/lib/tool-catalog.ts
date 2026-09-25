@@ -37,6 +37,12 @@ import {
 import { readStoredFile } from './storage';
 import { extractContent } from './document-extract';
 import { recordActivity } from './activity';
+import {
+  resolveQuantity,
+  playbackLine,
+  type QuantityResolution,
+  type ResolutionKind,
+} from './arabic';
 
 // ─────────────────────────────────────────────────────────────
 // Types (inherited runtime contract)
@@ -58,6 +64,12 @@ export interface ToolExecuteContext {
   threadId: string | null;
   consultationDepth: number;
   agentRunId?: string;
+  /** Id of the Message row the current turn was triggered by — recorded on
+   * QuantityResolution rows so an audit can walk figure → farmer's words. */
+  currentMessageId?: string;
+  /** Document ids attached to the current turn (voice notes, ledgers,
+   * spreadsheets) — recorded on QuantityResolution rows as sourceDocId. */
+  currentAttachmentDocIds?: string[];
 }
 
 export interface ToolResult {
@@ -350,15 +362,163 @@ export async function executeStartOrGetReport(
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// resolve_quantity — the Arabic layer's gatekeeper tool.
+// MUST run before any figure reaches record_* (enforced below, in
+// the executors — not just the prompt).
+// ─────────────────────────────────────────────────────────────
+
+export const RESOLVE_QUANTITY_TOOL: ToolDefinition = {
+  name: 'resolve_quantity',
+  description: `REQUIRED before record_waste / record_production whenever a figure came from partner words (chat text, voice transcript, or a document you read). Pass the partner's VERBATIM phrase (raw_text, dialect preserved — e.g. "عندي وايت جريد ونص كرب بعد القيظ"). Returns a resolution: kg low–high range, waste stream/fate, variety, reporting period, confidence, and either a resolution_id to pass to record_* OR a clarifying question (in the farmer's dialect) when the number can't be resolved without asking. Never pass a number you computed yourself — resolve first.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      raw_text: {
+        type: 'string',
+        description: "The partner's verbatim words containing the quantity — dialect, transliteration, or mixed script. Do not translate or clean it.",
+      },
+      kind: {
+        type: 'string',
+        description: 'WASTE | PRODUCTION | AUTO — narrows matching (e.g. skips stream/fate detection for production figures).',
+      },
+    },
+    required: ['raw_text'],
+  },
+};
+
+/**
+ * Persist a resolver output as an audit-grade QuantityResolution row and
+ * derive the source (voice/doc/chat) from the turn context — the model
+ * is never trusted to self-report provenance.
+ */
+async function persistResolution(
+  r: QuantityResolution,
+  ctx: ToolExecuteContext,
+): Promise<{ id: string }> {
+  let source: 'CHAT_TEXT' | 'VOICE_NOTE' | 'IMAGE' | 'DOCUMENT' = 'CHAT_TEXT';
+  let sourceDocId: string | null = null;
+
+  const docIds = ctx.currentAttachmentDocIds ?? [];
+  if (docIds.length > 0) {
+    const docs = await prisma.document.findMany({
+      where: { id: { in: docIds } },
+      select: { id: true, mimeType: true },
+    });
+    const audio = docs.find((d) => d.mimeType?.startsWith('audio/'));
+    const image = docs.find((d) => d.mimeType?.startsWith('image/'));
+    const anyDoc = docs[0];
+    if (audio) { source = 'VOICE_NOTE'; sourceDocId = audio.id; }
+    else if (image) { source = 'IMAGE'; sourceDocId = image.id; }
+    else if (anyDoc) { source = 'DOCUMENT'; sourceDocId = anyDoc.id; }
+  }
+
+  const row = await prisma.quantityResolution.create({
+    data: {
+      rawText: r.rawText,
+      normalized: r.normalized,
+      kgLow: r.kgLow,
+      kgHigh: r.kgHigh,
+      kgMid: r.kgMid,
+      count: r.count,
+      unitCode: r.unitCode,
+      quantityIndicative: r.quantityIndicative,
+      stream: (r.stream as never) ?? undefined,
+      streamMatched: r.streamMatched,
+      fate: (r.fate as never) ?? undefined,
+      fateMatched: r.fateMatched,
+      variety: r.variety,
+      periodYear: r.period?.year ?? null,
+      periodQuarter: r.period?.quarter ?? null,
+      periodBasis: r.period?.basis ?? null,
+      confidence: r.confidence,
+      neededClarification: r.mustClarify,
+      clarifyQuestion: r.clarifyQuestion,
+      source,
+      sourceMessageId: ctx.currentMessageId ?? null,
+      sourceDocId,
+      notes: r.notes as unknown as Prisma.InputJsonValue,
+    },
+  });
+  return { id: row.id };
+}
+
+function formatResolutionForModel(id: string, r: QuantityResolution): string {
+  const lines: string[] = [
+    `resolution_id: ${id}`,
+    `playback: ${playbackLine(r)}`,
+  ];
+  if (r.kgMid !== null) {
+    lines.push(
+      `quantity: ${r.kgLow}–${r.kgHigh} kg (midpoint ${r.kgMid} kg / ${(r.kgMid / 1000).toFixed(2)} t)` +
+      (r.quantityIndicative ? ' — INDICATIVE range from a local unit estimate' : ''),
+    );
+  }
+  if (r.stream) lines.push(`stream: ${r.stream} (matched "${r.streamMatched}")`);
+  if (r.fate) lines.push(`fate: ${r.fate} (matched "${r.fateMatched}")`);
+  else if (r.stream) lines.push('fate: UNKNOWN — ask where it went');
+  if (r.variety) lines.push(`variety: ${r.variety}`);
+  if (r.period) lines.push(`period: ${r.period.year} Q${r.period.quarter} (via "${r.period.matched}", ${r.period.confidence})`);
+  lines.push(`confidence: ${r.confidence}`);
+  if (r.mustClarify) {
+    lines.push(`MUST_CLARIFY — do NOT record yet. Ask the partner exactly this (their dialect): "${r.clarifyQuestion}"`);
+  } else {
+    lines.push('READY — pass this resolution_id to record_waste / record_production after the partner confirms the playback.');
+  }
+  return lines.join('\n');
+}
+
+export async function executeResolveQuantity(
+  input: { raw_text: string; kind?: string },
+  ctx: ToolExecuteContext,
+): Promise<ToolResult> {
+  if (!input.raw_text?.trim()) {
+    return err('resolve_quantity requires raw_text — the partner\'s verbatim words.');
+  }
+  const kind: ResolutionKind =
+    input.kind === 'WASTE' || input.kind === 'PRODUCTION' ? input.kind : 'AUTO';
+  const r = resolveQuantity(input.raw_text, kind);
+  const { id } = await persistResolution(r, ctx);
+  await audit(ctx, 'resolve_quantity', id, {
+    rawText: r.rawText,
+    kgMid: r.kgMid,
+    unit: r.unitCode,
+    stream: r.stream,
+    confidence: r.confidence,
+    mustClarify: r.mustClarify,
+  });
+  return { text: formatResolutionForModel(id, r), effects: { resolutionId: id } };
+}
+
+/** Resolve + persist an inline raw_text (record_* called without a prior
+ * resolve_quantity call — the gate resolves it anyway so nothing is
+ * recorded without provenance). The caller decides whether a
+ * mustClarify result blocks recording. */
+async function resolveInline(
+  rawText: string,
+  kind: 'WASTE' | 'PRODUCTION',
+  ctx: ToolExecuteContext,
+): Promise<{ r: QuantityResolution; id: string }> {
+  const r = resolveQuantity(rawText, kind);
+  // Persist even when unresolved — an unresolvable utterance is
+  // audit-worthy too (neededClarification records what was said).
+  const { id } = await persistResolution(r, ctx);
+  return { r, id };
+}
+
 export const RECORD_PRODUCTION_TOOL: ToolDefinition = {
   name: 'record_production',
-  description: `Set production figures on a DRAFT/RETURNED report AFTER the partner confirms them. Farms: datesProducedTons = harvested. Factories/recyclers: datesProducedTons = received; use processing_capacity_tons for capacity. Overwrites previous values for provided fields only.`,
+  description: `Set production figures on a DRAFT/RETURNED report AFTER the partner confirms them. Farms: datesProducedTons = harvested. Factories/recyclers: datesProducedTons = received; use processing_capacity_tons for capacity. Overwrites previous values for provided fields only.
+
+PROVENANCE GATE: when the figures came from partner words, pass resolution_id (from resolve_quantity) — or raw_text and the executor resolves it first. Bare tonnage with no provenance is rejected.`,
   input_schema: {
     type: 'object',
     properties: {
       report_id: { type: 'string' },
+      resolution_id: { type: 'string', description: 'QuantityResolution.id returned by resolve_quantity. The recorded tonnage defaults to its kg midpoint.' },
+      raw_text: { type: 'string', description: "Partner's verbatim quantity phrase — resolved internally if no resolution_id." },
       palm_tree_count: { type: 'number' },
-      dates_produced_tons: { type: 'number' },
+      dates_produced_tons: { type: 'number', description: 'Explicit tons — overrides the resolution midpoint when the partner stated an exact figure.' },
       dates_sold_tons: { type: 'number' },
       varieties: { type: 'array', items: { type: 'string' } },
       processing_capacity_tons: { type: 'number' },
@@ -371,6 +531,8 @@ export const RECORD_PRODUCTION_TOOL: ToolDefinition = {
 export async function executeRecordProduction(
   input: {
     report_id: string;
+    resolution_id?: string;
+    raw_text?: string;
     palm_tree_count?: number;
     dates_produced_tons?: number;
     dates_sold_tons?: number;
@@ -388,6 +550,39 @@ export async function executeRecordProduction(
   if (report.status !== 'DRAFT' && report.status !== 'RETURNED')
     return err(`Report is ${report.status} — production can only change on DRAFT/RETURNED reports.`);
 
+  // ── Provenance gate ──────────────────────────────────────────
+  // A figure from partner words must come through the Arabic resolver.
+  const carriesTonnage = input.dates_produced_tons !== undefined || input.dates_sold_tons !== undefined;
+  let resolutionId: string | null = input.resolution_id ?? null;
+  if (resolutionId) {
+    const res = await prisma.quantityResolution.findUnique({ where: { id: resolutionId } });
+    if (!res) return err(`resolution_id ${resolutionId} not found — call resolve_quantity with the partner's exact words first.`);
+    if (res.neededClarification) {
+      return err(`Resolution ${resolutionId} was flagged MUST_CLARIFY — ask the partner "${res.clarifyQuestion ?? 'confirm the quantity'}" and resolve their reply first.`);
+    }
+    if (res.kgMid !== null && input.dates_produced_tons === undefined && input.dates_sold_tons === undefined) {
+      input = { ...input, dates_produced_tons: res.kgMid / 1000 };
+    }
+    if (res.variety && input.varieties === undefined) {
+      input = { ...input, varieties: [res.variety] };
+    }
+  } else if (input.raw_text) {
+    const { r, id } = await resolveInline(input.raw_text, 'PRODUCTION', ctx);
+    resolutionId = id;
+    if (r.mustClarify) {
+      return err(`Resolution ${resolutionId} was flagged MUST_CLARIFY — ask the partner "${r.clarifyQuestion ?? 'confirm the quantity'}" and resolve their reply first.`);
+    }
+    if (r.kgMid === null) {
+      return err(`Could not resolve a figure from "${input.raw_text}". Ask the partner: "${r.clarifyQuestion ?? 'كم الكمية بالكيلو أو الطن؟'}" then resolve_quantity their reply.`);
+    }
+    if (!carriesTonnage) {
+      input = { ...input, dates_produced_tons: r.kgMid / 1000 };
+      if (r.variety && !input.varieties) input = { ...input, varieties: [r.variety] };
+    }
+  } else if (carriesTonnage && !input.resolution_id) {
+    return err('Tonnage with no provenance is rejected. Call resolve_quantity with the partner\'s exact words first (or pass raw_text) — every recorded figure must trace to what they said.');
+  }
+
   const data = {
     ...(input.palm_tree_count !== undefined ? { palmTreeCount: Math.round(input.palm_tree_count) } : {}),
     ...(input.dates_produced_tons !== undefined ? { datesProducedTons: input.dates_produced_tons } : {}),
@@ -395,6 +590,7 @@ export async function executeRecordProduction(
     ...(input.varieties !== undefined ? { varieties: input.varieties } : {}),
     ...(input.processing_capacity_tons !== undefined ? { processingCapacityTons: input.processing_capacity_tons } : {}),
     ...(input.notes !== undefined ? { notes: input.notes } : {}),
+    ...(resolutionId ? { resolutionId } : {}),
   };
 
   await prisma.productionRecord.upsert({
@@ -403,33 +599,43 @@ export async function executeRecordProduction(
     create: { reportId: report.id, ...data },
   });
 
+  // Thread the source doc (voice note, ledger photo) onto the report
+  // so the audit trail is figure → resolution → source.
+  if (resolutionId) await linkResolutionSourceToReport(resolutionId, report.id);
+
   await audit(ctx, 'record_production', report.id, data as Prisma.InputJsonValue);
-  return { text: `Production recorded on ${report.partner.registryNo} ${report.year} Q${report.quarter}: ${JSON.stringify(data)}` };
+  return { text: `Production recorded on ${report.partner.registryNo} ${report.year} Q${report.quarter}: ${JSON.stringify(data)}${resolutionId ? ` (resolution ${resolutionId})` : ''}` };
 }
 
 export const RECORD_WASTE_TOOL: ToolDefinition = {
   name: 'record_waste',
-  description: `Add or replace ONE waste-stream record on a DRAFT/RETURNED report after partner confirmation. One record per (stream, fate) pair — recording the same pair again replaces it. destination_registry_no when material went to another network member (enables national traceability).`,
+  description: `Add or replace ONE waste-stream record on a DRAFT/RETURNED report after partner confirmation. One record per (stream, fate) pair — recording the same pair again replaces it. destination_registry_no when material went to another network member (enables national traceability).
+
+PROVENANCE GATE: the quantity must come through resolve_quantity. Pass resolution_id (preferred — stream/fate/tons are taken from the resolution and only need to be repeated if you are correcting them) or raw_text. Bare tons with no provenance are rejected.`,
   input_schema: {
     type: 'object',
     properties: {
       report_id: { type: 'string' },
-      stream: { type: 'string', description: 'DATES | PITS | FRONDS | FROND_BASE | FIBER | OTHER' },
-      fate: { type: 'string', description: 'FEED | SOLD | RECYCLED | BURNED | BURIED | DUMPED | UNKNOWN' },
-      tons: { type: 'number' },
+      resolution_id: { type: 'string', description: 'QuantityResolution.id from resolve_quantity. Stream/fate/tonnage default from it.' },
+      raw_text: { type: 'string', description: "Partner's verbatim quantity phrase — resolved internally if no resolution_id." },
+      stream: { type: 'string', description: 'DATES | PITS | FRONDS | FROND_BASE | FIBER | OTHER — defaults to the resolution\'s matched stream' },
+      fate: { type: 'string', description: 'FEED | SOLD | RECYCLED | BURNED | BURIED | DUMPED | UNKNOWN — defaults to the resolution\'s matched fate' },
+      tons: { type: 'number', description: 'Explicit tons — overrides the resolution midpoint when the partner stated an exact figure' },
       destination_registry_no: { type: 'string' },
       notes: { type: 'string' },
     },
-    required: ['report_id', 'stream', 'fate', 'tons'],
+    required: ['report_id'],
   },
 };
 
 export async function executeRecordWaste(
   input: {
     report_id: string;
-    stream: string;
-    fate: string;
-    tons: number;
+    resolution_id?: string;
+    raw_text?: string;
+    stream?: string;
+    fate?: string;
+    tons?: number;
     destination_registry_no?: string;
     notes?: string;
   },
@@ -442,12 +648,45 @@ export async function executeRecordWaste(
   if (!report) return err('Report not found.');
   if (report.status !== 'DRAFT' && report.status !== 'RETURNED')
     return err(`Report is ${report.status} — waste records can only change on DRAFT/RETURNED reports.`);
+
+  // ── Provenance gate ──────────────────────────────────────────
+  // resolve_quantity must produce the number — enforced here, in code.
+  let resolutionId: string | null = input.resolution_id ?? null;
+  if (resolutionId) {
+    const res = await prisma.quantityResolution.findUnique({ where: { id: resolutionId } });
+    if (!res) return err(`resolution_id ${resolutionId} not found — call resolve_quantity with the partner's exact words first.`);
+    if (res.neededClarification) {
+      return err(`Resolution ${resolutionId} was flagged MUST_CLARIFY — ask the partner "${res.clarifyQuestion ?? 'confirm the quantity'}" and resolve their reply first.`);
+    }
+    input.stream = input.stream ?? res.stream ?? undefined;
+    input.fate = input.fate ?? res.fate ?? undefined;
+    if (input.tons === undefined && res.kgMid !== null) input.tons = res.kgMid / 1000;
+  } else if (input.raw_text) {
+    const { r, id } = await resolveInline(input.raw_text, 'WASTE', ctx);
+    resolutionId = id;
+    if (r.mustClarify || r.kgMid === null) {
+      if (input.tons === undefined) {
+        return err(`Could not resolve a quantity from "${input.raw_text}". Ask the partner: "${r.clarifyQuestion ?? 'كم الكمية؟'}" then resolve_quantity their reply.`);
+      }
+      // explicit tons + unresolvable text — record with the (flagged) resolution attached
+    } else {
+      input.stream = input.stream ?? r.stream ?? undefined;
+      input.fate = input.fate ?? r.fate ?? undefined;
+      if (input.tons === undefined) input.tons = r.kgMid! / 1000;
+    }
+  } else if (input.tons !== undefined) {
+    return err('Tonnage with no provenance is rejected. Call resolve_quantity with the partner\'s exact words first (or pass raw_text) — every recorded figure must trace to what they said.');
+  }
+
+  if (input.tons === undefined) return err('No tonnage resolved. Call resolve_quantity on the partner\'s words first.');
   if (input.tons < 0) return err('tons must be ≥ 0.');
 
   const STREAMS = ['DATES', 'PITS', 'FRONDS', 'FROND_BASE', 'FIBER', 'OTHER'];
   const FATES = ['FEED', 'SOLD', 'RECYCLED', 'BURNED', 'BURIED', 'DUMPED', 'UNKNOWN'];
-  if (!STREAMS.includes(input.stream)) return err(`stream must be one of ${STREAMS.join(', ')}`);
-  if (!FATES.includes(input.fate)) return err(`fate must be one of ${FATES.join(', ')}`);
+  if (!input.stream || !STREAMS.includes(input.stream))
+    return err(`stream must be one of ${STREAMS.join(', ')} — the resolution didn\'t identify one; ask which byproduct it is (سعف/كرب/ليف/نوى/فاقد).`);
+  if (!input.fate || !FATES.includes(input.fate))
+    return err(`fate must be one of ${FATES.join(', ')} — the resolution didn\'t identify one; ask where the material went (علف؟ بيع؟ تدوير؟)`);
 
   if (input.destination_registry_no) {
     const dest = await prisma.partner.findUnique({ where: { registryNo: input.destination_registry_no } });
@@ -466,11 +705,30 @@ export async function executeRecordWaste(
       tons: input.tons,
       destinationRegistryNo: input.destination_registry_no ?? null,
       notes: input.notes ?? null,
+      resolutionId,
     },
   });
 
+  // Thread the source doc (voice note, ledger photo) onto the report.
+  if (resolutionId) await linkResolutionSourceToReport(resolutionId, report.id);
+
   await audit(ctx, 'record_waste', report.id, input as unknown as Prisma.InputJsonValue);
-  return { text: `Waste recorded on ${report.partner.registryNo} ${report.year} Q${report.quarter}: ${input.stream} ${input.tons}t → ${input.fate}${input.destination_registry_no ? ` (to ${input.destination_registry_no})` : ''}` };
+  return { text: `Waste recorded on ${report.partner.registryNo} ${report.year} Q${report.quarter}: ${input.stream} ${input.tons}t → ${input.fate}${input.destination_registry_no ? ` (to ${input.destination_registry_no})` : ''}${resolutionId ? ` (resolution ${resolutionId})` : ''}` };
+}
+
+/** When a resolution carries a source document (voice note, ledger
+ * photo), append it to the report's sourceDocIds — the audit trail is
+ * figure → resolution → farmer's words → original media. */
+async function linkResolutionSourceToReport(resolutionId: string, reportId: string) {
+  const res = await prisma.quantityResolution.findUnique({
+    where: { id: resolutionId },
+    select: { sourceDocId: true },
+  });
+  if (!res?.sourceDocId) return;
+  await prisma.quarterlyReport.update({
+    where: { id: reportId },
+    data: { sourceDocIds: { push: res.sourceDocId } },
+  });
 }
 
 export const SUBMIT_REPORT_TOOL: ToolDefinition = {
@@ -1299,6 +1557,7 @@ const PARTNER_FACING_TOOLS: ToolDefinition[] = [
   UPDATE_PARTNER_PROFILE_TOOL,
   LIST_PARTNER_REPORTS_TOOL,
   START_OR_GET_REPORT_TOOL,
+  RESOLVE_QUANTITY_TOOL,
   RECORD_PRODUCTION_TOOL,
   RECORD_WASTE_TOOL,
   SUBMIT_REPORT_TOOL,
@@ -1328,7 +1587,7 @@ export function toolsForAgent(slug: string): ToolDefinition[] {
     case 'abd-00':
       return [...PARTNER_FACING_TOOLS, GET_REPORT_DETAIL_TOOL, SET_VALIDATION_RESULT_TOOL, APPROVE_REPORT_TOOL, LIST_PARTNERS_TOOL, REQUEST_TIER_CHANGE_TOOL, UPDATE_TASK_STATUS_TOOL, LIST_TASKS_TOOL, CREATE_COLLECTION_TICKET_TOOL, SUBMIT_PORTAL_APPLICATION_TOOL, LOG_SUGGESTION_TOOL, BULK_REGISTER_PARTNERS_TOOL];
     case 'int-01':
-      return [READ_DOCUMENT_TOOL, LIST_DOCUMENTS_TOOL, GET_PARTNER_PROFILE_TOOL, LIST_PARTNER_REPORTS_TOOL, GET_REPORT_DETAIL_TOOL, GET_FACTS_TOOL];
+      return [READ_DOCUMENT_TOOL, LIST_DOCUMENTS_TOOL, GET_PARTNER_PROFILE_TOOL, LIST_PARTNER_REPORTS_TOOL, GET_REPORT_DETAIL_TOOL, GET_FACTS_TOOL, RESOLVE_QUANTITY_TOOL];
     case 'val-01':
       return [...BACKEND_COMMON, SET_VALIDATION_RESULT_TOOL];
     case 'ana-01':
@@ -1441,6 +1700,7 @@ export const ALL_TOOLS: ToolDefinition[] = [
   LIST_PARTNERS_TOOL,
   LIST_PARTNER_REPORTS_TOOL,
   START_OR_GET_REPORT_TOOL,
+  RESOLVE_QUANTITY_TOOL,
   RECORD_PRODUCTION_TOOL,
   RECORD_WASTE_TOOL,
   SUBMIT_REPORT_TOOL,

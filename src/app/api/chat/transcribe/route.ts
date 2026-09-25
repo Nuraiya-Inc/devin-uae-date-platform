@@ -17,6 +17,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { persistUpload, StorageError } from '@/lib/storage';
+import { buildSttPrompt } from '@/lib/arabic';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -71,17 +73,53 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ── Persist the audio FIRST — voice notes are evidence, not ephemera.
+  // Without this the audit trail ends at the transcript and the original
+  // farmer utterance is unrecoverable. Document is tagged 'voice-note';
+  // the chat route attaches the agent's branch when the client sends it
+  // as an attachment (attachedDocIds), same as any upload.
+  const dbUser = await prisma.user.findUnique({ where: { id: session.user.id } });
+  if (!dbUser) return NextResponse.json({ error: 'User not found' }, { status: 401 });
+
+  const audioDoc = await prisma.document.create({
+    data: {
+      title: `Voice note — ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+      kind: 'GENERAL',
+      ipSensitivity: 'INTERNAL',
+      entity: dbUser.entity,
+      allowedBranches: [],
+      tags: ['voice-note'],
+      uploaderId: dbUser.id,
+      mimeType: mime || 'audio/webm',
+    },
+  });
+  let audioDocId: string | null = null;
+  try {
+    const persisted = await persistUpload(audioDoc.id, audio);
+    await prisma.document.update({
+      where: { id: audioDoc.id },
+      data: { storagePath: persisted.storagePath, sizeBytes: persisted.sizeBytes, mimeType: persisted.mimeType },
+    });
+    audioDocId = audioDoc.id;
+  } catch (err) {
+    await prisma.document.delete({ where: { id: audioDoc.id } }).catch(() => undefined);
+    const status = err instanceof StorageError ? 400 : 500;
+    return NextResponse.json(
+      { error: `Could not store voice note: ${err instanceof Error ? err.message : 'unknown'}` },
+      { status },
+    );
+  }
+
   // Forward to Whisper. We pass the user's audio file straight through —
   // no transcoding, no buffering beyond the FormData boundary.
   const whisperForm = new FormData();
   whisperForm.append('file', audio, audio.name || 'recording.webm');
   whisperForm.append('model', 'whisper-1');
   whisperForm.append('response_format', 'json');
-  // Optional hint to Whisper for better domain-specific recognition.
-  whisperForm.append(
-    'prompt',
-    'UAE Palm Network, dates, date palm, Khalas, Lulu, Fard, Khenaizi, Barhi, Dabbas, Medjool, Al Ain, Liwa, Al Dhafra, Ras Al Khaimah, Fujairah, fronds, saaf, karab, leef, tons, quarterly report, recycling, compost, biochar.',
-  );
+  // Domain hint built from the SAME Arabic lexicon the resolver uses —
+  // Arabic script (جريد/وايت/بيكة/كرب) so Whisper preserves dialect
+  // spellings instead of transliterating them into Latin.
+  whisperForm.append('prompt', buildSttPrompt());
 
   const start = Date.now();
   let whisperRes: Response;
@@ -121,7 +159,16 @@ export async function POST(req: NextRequest) {
 
   const text = (data.text ?? '').trim();
   if (!text) {
-    return NextResponse.json({ error: 'No speech detected in the recording.' }, { status: 400 });
+    return NextResponse.json({ error: 'No speech detected in the recording.', docId: audioDocId }, { status: 400 });
+  }
+
+  // Link the transcript back to the audio Document — the audit trail is
+  // figure → resolution → transcript → original voice note.
+  if (audioDocId) {
+    await prisma.document.update({
+      where: { id: audioDocId },
+      data: { extractedText: text.slice(0, 8000) },
+    }).catch(() => undefined);
   }
 
   // Quiet audit log — useful to track cost + usage patterns without blowing up the log volume
@@ -134,5 +181,5 @@ export async function POST(req: NextRequest) {
     },
   }).catch(() => undefined);
 
-  return NextResponse.json({ ok: true, text });
+  return NextResponse.json({ ok: true, text, docId: audioDocId });
 }

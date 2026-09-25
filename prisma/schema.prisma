@@ -1617,6 +1617,14 @@ enum WasteFate {
   UNKNOWN
 }
 
+/// How a farmer utterance reached the resolver — for the audit trail.
+enum QuantitySource {
+  CHAT_TEXT
+  VOICE_NOTE
+  IMAGE
+  DOCUMENT
+}
+
 model Partner {
   id             String            @id @default(cuid())
   /// Public registry number, e.g. "NCPD-QSM-00042"
@@ -1710,6 +1718,11 @@ model ProductionRecord {
   varieties              String[] @default([])
   processingCapacityTons Float? // factories/recyclers
   notes                  String?
+
+  /// Provenance — the resolve_quantity step that produced these figures.
+  /// Null only for legacy/pre-arabic-layer records.
+  resolutionId String?
+  resolution   QuantityResolution? @relation(fields: [resolutionId], references: [id])
 }
 
 model WasteRecord {
@@ -1725,8 +1738,76 @@ model WasteRecord {
   destinationRegistryNo String?
   notes                 String?
 
+  /// Provenance — the resolve_quantity step that produced `tons`.
+  /// `tons` stores the resolved MIDPOINT; the honest low/high range and
+  /// the farmer's original words live on the resolution row.
+  resolutionId String?
+  resolution   QuantityResolution? @relation(fields: [resolutionId], references: [id])
+
   @@index([reportId])
   @@index([stream, fate])
+  @@index([resolutionId])
+}
+
+/// Audit-grade provenance for every recorded quantity.
+///
+/// The resolve_quantity tool (or an inline raw_text resolve inside a
+/// record tool) creates one row per utterance: the farmer's verbatim
+/// words, the unit the resolver matched, the honest kg range, the
+/// confidence, and a link back to the source message/document (voice
+/// note, ledger photo). This is what turns "the record shows the
+/// figure" into "the record shows the figure PLUS how it was resolved".
+model QuantityResolution {
+  id String @id @default(cuid())
+
+  /// Farmer's words verbatim (dialect preserved).
+  rawText    String
+  /// Normalized text the resolver parsed (Latin digits, no diacritics).
+  normalized String
+
+  /// Resolved bounds in kg. Null when the utterance carried no
+  /// resolvable quantity (clarifying question was issued instead).
+  kgLow Float?
+  kgHigh Float?
+  /// Working midpoint — what record_* writes as `tons`.
+  kgMid Float?
+  count Float?
+  /// LocalUnit.code or null for a bare kg/ton amount.
+  unitCode String?
+  /// True when the range comes from a local-unit estimate (INDICATIVE).
+  quantityIndicative Boolean @default(false)
+
+  stream        WasteStream?
+  streamMatched String?
+  fate          WasteFate?
+  fateMatched   String?
+  variety       String?
+  periodYear    Int?
+  periodQuarter Int?
+  periodBasis   String? // SEASON | HIJRI | EXPLICIT | APPROX
+
+  /// LOW | MEDIUM | HIGH — resolver verdict, not a guess.
+  confidence    String
+  /// Whether a clarifying question was required before recording.
+  neededClarification Boolean @default(false)
+  /// The dialect-phrased question issued (when neededClarification).
+  clarifyQuestion     String?
+
+  /// Provenance links.
+  source          QuantitySource @default(CHAT_TEXT)
+  sourceMessageId String?
+  sourceDocId     String?
+
+  /// Resolver decision notes (unit caveats, approximations, basis).
+  notes Json?
+
+  wasteRecords      WasteRecord[]
+  productionRecords ProductionRecord[]
+
+  createdAt DateTime @default(now())
+
+  @@index([sourceMessageId])
+  @@index([sourceDocId])
 }
 
 model MaterialTransfer {
