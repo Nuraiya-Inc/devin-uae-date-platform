@@ -1152,12 +1152,12 @@ export async function executeLogSuggestion(
 // registry numbers per region. Partner-portal users can never call this.
 // ─────────────────────────────────────────────────────────────
 
-const REGION_REGISTRY_CODE: Record<string, string> = {
+export const REGION_REGISTRY_CODE: Record<string, string> = {
   ABU_DHABI: 'AUH', DUBAI: 'DXB', SHARJAH: 'SHJ', AJMAN: 'AJM',
   UMM_AL_QUWAIN: 'UAQ', RAS_AL_KHAIMAH: 'RAK', FUJAIRAH: 'FUJ',
 };
 
-async function nextRegistryNo(region: string, offsetCache: Map<string, number>): Promise<string> {
+export async function nextRegistryNo(region: string, offsetCache: Map<string, number>): Promise<string> {
   const code = REGION_REGISTRY_CODE[region] ?? region.slice(0, 3).toUpperCase();
   const prefix = `UPN-${code}-`;
   if (!offsetCache.has(code)) {

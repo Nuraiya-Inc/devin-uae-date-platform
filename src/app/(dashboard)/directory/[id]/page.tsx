@@ -19,6 +19,7 @@ import {
   CONFIDENCE_STYLES,
   RELATIONSHIP_STYLES,
 } from '@/lib/directory-labels';
+import PromoteCard from './PromoteCard';
 
 export const dynamic = 'force-dynamic';
 
@@ -128,21 +129,23 @@ export default async function DirectoryEntryPage({ params }: { params: Promise<{
         </section>
       )}
 
-      <section className="rounded-xl border border-line bg-white p-5 text-sm">
-        <h2 className="mb-2 text-sm font-semibold text-brand-800">Network status</h2>
-        {entry.partner ? (
+      {entry.partner ? (
+        <section className="rounded-xl border border-line bg-white p-5 text-sm">
+          <h2 className="mb-2 text-sm font-semibold text-brand-800">Network status</h2>
           <p className="text-forest-700">
             Registered as partner{' '}
             <span className="font-mono text-xs">{entry.partner.registryNo}</span> — {entry.partner.nameEn} (
             {entry.partner.tier}). This entry now counts in partner aggregates via its Partner record.
           </p>
-        ) : (
-          <p className="text-muted">
-            Not a registered partner — excluded from all partner aggregates (UPN-7). Promotion is a staff action
-            (TD4); tier/certification changes follow the approvals queue (UPN-2).
-          </p>
-        )}
-      </section>
+        </section>
+      ) : (
+        <PromoteCard
+          entryId={entry.id}
+          stage={entry.stage}
+          region={entry.region}
+          location={entry.location}
+        />
+      )}
     </div>
   );
 }
