@@ -10,8 +10,13 @@ import type { UserRole, SafaEntity } from '@prisma/client';
  * leaving NEXTAUTH_URL pointing at the bare IP address. This forces the
  * canonical URL regardless of what's passed at runtime. Set BEFORE
  * NextAuth() is called so the auth library picks up the right value.
+ * Applied in production only — in dev, honor AUTH_URL/NEXTAUTH_URL so
+ * localhost signin and redirects stay on the dev origin.
  */
-const CANONICAL_URL = 'https://uae.safabioworks.com';
+const CANONICAL_URL =
+  process.env.NODE_ENV === 'production'
+    ? 'https://uae.safabioworks.com'
+    : (process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? 'http://localhost:3000');
 process.env.NEXTAUTH_URL = CANONICAL_URL;
 process.env.AUTH_URL = CANONICAL_URL;
 process.env.AUTH_TRUST_HOST = 'true';

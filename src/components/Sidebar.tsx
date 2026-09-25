@@ -42,6 +42,7 @@ import {
   FileBarChart,
   Sparkles,
   Map as MapIcon,
+  BookUser,
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react';
@@ -107,6 +108,7 @@ const NAV: NavGroupDef[] = [
     label: 'Network',
     items: [
       { href: '/partners',  label: 'Partners',  icon: Users },
+      { href: '/directory', label: 'Directory', icon: BookUser },
       { href: '/network',   label: 'Network inbox', icon: Inbox },
       { href: '/standings', label: 'Standings', icon: Trophy },
       { href: '/ask', label: 'Ask the Sector', icon: Sparkles },
